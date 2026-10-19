@@ -39,7 +39,7 @@ When rating, grading, reviewing or analyzing anything: games, sports events, mov
 "stats" = big number grid. "ranked" = scored ranked list. All fields optional except title+rating.
 
 ## \`stats — KPI stat grid (sales, report cards, progress, numbers)
-{"title":"Q3 sales snapshot","items":[{"label":"Revenue","value":"$48.2k","sub":"+12% QoQ","icon":"💰"},{"label":"New users","value":"1,240","sub":"+31%"},{"label":"Churn","value":"2.1%","sub":"-0.4pt","icon":"📉"}]}
+{"title":"Q3 sales snapshot","items":[{"label":"Revenue","value":"$48.2k","sub":"+12% QoQ"},{"label":"New users","value":"1,240","sub":"+31%"},{"label":"Churn","value":"2.1%","sub":"-0.4pt"}]}
 
 ## \`compare — side-by-side comparison
 For "X vs Y", choices, purchases, decisions. Sales-friendly.

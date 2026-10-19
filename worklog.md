@@ -17,3 +17,24 @@ Stage Summary:
 - Deliverable: /home/z/my-project/download/ace/ (+ ace.zip) — deploy-and-done static app; live preview at Next.js root page.
 - Key decisions: free-tier-first model routing with automatic fallback; honesty-first web grounding (wiki+DDG refs, tool activates with balance); API key stored in Firestore config/secrets, never in repo; sandbox proxy auto-detection for preview.
 - All 10 todo items complete; E2E verified in browser.
+
+---
+Task ID: 2
+Agent: main (Z.ai GLM)
+Task: Deep fix of Ace per user bug report: all features broken, remove all emojis from UI, web search fake, messages slow, add task stopwatch, agentic mode crashed.
+
+Work Log:
+- Diagnosed root causes via live API probes: (1) glm-5.3 rejects thinking:disabled with error 1210 "This model always engages in thinking and cannot be disabled" → Work mode died on the planner call; (2) glm-5.3/4.7/4.6 all need balance (1113) on the user's free key → every premium-first route failed then fell back slowly; (3) Z.ai web_search tool silently no-ops on free keys (hallucinated answers); (4) model emits malformed quiz JSON (dup keys, missing colons) → quizzes rendered as raw code; (5) throttled-emit trailing-timer race re-opened streaming state after completion (Stop button stuck, ticking chip); (6) Bing RSS needs mkt=en-US + keyword-cleaned queries (raw questions → Microsoft homepage junk).
+- api.js: added thinking-error auto-retry (1210 → drop thinking param, same model), real multi-source searchWeb (proxy /api/zai/search → Bing RSS + DDG HTML POST + Wikipedia extracts + DDG IA + Google News; browser-direct on GitHub Pages: Wikipedia + DDG IA CORS-open + best-effort Bing via public CORS proxies), 5-min query cache, search query cleaner (question → keywords), throttle cancel(), streaming done-guard.
+- New Next.js route /api/zai/search: server-side parallel engines, server-side query cleanup, junk-domain filter, 5-min cache. Verified: "Islam Makhachev record" → real 29-1 data + fresh ESPN/Tapology pages.
+- config.js: free-first routing (everything glm-4.5-flash; Think = same model with reasoning on; vision glm-4.6v-flash), chainFor() fallback helper, new SVG icons (thumbs, eye, clock).
+- work.js: runs on free model (no 1210, no balance needed), fixed continuation prompt (now passes the partial tail — old code asked to continue with zero context), live streaming code panel (s.live was never set in old code — panel never appeared), per-step timings, review score gate (7+/10 with no fatal issues ships instead of burning minutes on rebuilds), artifact blob URL fix.
+- chat.js: task stopwatch system (taskbar chips: Searching the web · X.Xs / Thinking / Writing / Creating quiz UI · X.Xs + "Worked for X.Xs" total, 120ms live ticker, quiz-fence phase detection), honest web flag (only shows "Searched the web" when refs actually came back), Think toggle → free model + reasoning, race fix (streamDone guard), work-mode retry dispatch, emoji removal (SVG icons for chips/ratings).
+- blocks.js: 3-pass JSON repair pipeline (structural regex fixes → brace-slicing salvage that drops only broken items and keeps good questions; 12/12 unit tests pass incl. real malformed model output), quiz normalization (string/letter/text answers → index, tf coercion, type aliases, multi-answer coercion, fuzzy short-answer match), fixed multi verdict display, emoji-free grades/buttons/hints.
+- app.js + index.html + prompts.js: removed every emoji from UI chrome (setup features, drop overlay, toasts, memory modal, model popover → SVG icons, welcome chips → icons, ratings → thumb icons, stars → dots).
+- E2E verified in browser: setup, quiz renders interactively + answers + verdicts, web search returns real current data (29-1, Aug 2026 fight) with source chips + scorecard composed from live results, stopwatch chips + Worked for totals, Think reasoning block, Work mode full loop (plan 4s → build 58.9s → review → fix → ship 8/10, 16.7 KB artifact, live preview + Open/Download/Code), memory extraction (1 memory), emoji-free chrome (VLM-verified screenshots).
+- Re-zipped download/ace.zip (78.9 KB), synced public/ace, updated README.
+
+Stage Summary:
+- All reported issues fixed: agentic mode works end-to-end on free models, web search is real (multi-engine, grounded, cited), stopwatch shows per-phase timings + Worked for total, UI is emoji-free, quizzes render despite malformed JSON, chat is fast (thinking off by default).
+- Key decisions: free-first routing (premium only by explicit Settings choice, auto-fallback on 1113/1211/1210); search = proxy (preview/school firewall) + browser-direct (GitHub Pages) with cache; review score gate to keep build times sane on the free model.

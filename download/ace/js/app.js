@@ -82,8 +82,13 @@ window.Ace = window.Ace || {};
     const keyInp = Ace.el("input", "input mono");
     keyInp.type = "password"; keyInp.placeholder = "Paste your Z.ai API key";
     keyInp.value = Ace.API.key || "";
-    const eye = Ace.el("button", "btn btn-icon", "👁");
-    eye.onclick = () => { keyInp.type = keyInp.type === "password" ? "text" : "password"; };
+    const eye = Ace.el("button", "btn btn-icon");
+    eye.innerHTML = Ace.ICON("eye", 15);
+    eye.title = "Show / hide";
+    eye.onclick = () => {
+      keyInp.type = keyInp.type === "password" ? "text" : "password";
+      eye.innerHTML = Ace.ICON(keyInp.type === "password" ? "eye" : "eyeOff", 15);
+    };
     const testB = Ace.el("button", "btn btn-ghost", "Test");
     const saveB = Ace.el("button", "btn btn-primary", "Save key");
     keyRow.append(keyInp, eye, testB, saveB);
@@ -91,7 +96,7 @@ window.Ace = window.Ace || {};
       testB.textContent = "Testing…"; testB.disabled = true;
       const r = await Ace.API.testKey(keyInp.value);
       testB.textContent = "Test"; testB.disabled = false;
-      UI.toast(r.ok ? "✅ Key works — free GLM-4.5 Flash responded" : "❌ " + Ace.API.friendlyError(r.error), r.ok ? "ok" : "warn");
+      UI.toast(r.ok ? "Key works — free GLM-4.5 Flash responded" : Ace.API.friendlyError(r.error), r.ok ? "ok" : "warn");
     };
     saveB.onclick = async () => {
       const k = keyInp.value.trim();
@@ -197,7 +202,7 @@ window.Ace = window.Ace || {};
         createdAt: Date.now(), lastAccessed: Date.now(), accessCount: 0, pinned: false
       });
       inp.value = "";
-      UI.toast("🧠 Remembered", "ok");
+      UI.toast("Remembered", "ok");
       h.close();
       UI.openMemory();
     };
@@ -210,7 +215,7 @@ window.Ace = window.Ace || {};
         const row = Ace.el("div", "memory-row");
         const main = Ace.el("div", "memory-main",
           `<div class="memory-content">${Ace.esc(m.content)}</div>
-           <div class="memory-meta">${"★".repeat(m.importance || 1)}${"☆".repeat(Math.max(0, 5 - (m.importance || 1)))} · used ${m.accessCount || 0}×</div>`);
+           <div class="memory-meta">${"●".repeat(m.importance || 1)}${"○".repeat(Math.max(0, 5 - (m.importance || 1)))} · used ${m.accessCount || 0}×</div>`);
         const acts = Ace.el("div", "memory-acts");
         const pin = Ace.el("button", "mact" + (m.pinned ? " on" : ""), Ace.ICON("pin", 13));
         pin.title = "Pin (always in context)";
@@ -223,7 +228,7 @@ window.Ace = window.Ace || {};
         const del = Ace.el("button", "mact", Ace.ICON("trash", 13));
         del.title = "Forget";
         del.onclick = () => UI.confirm("Forget this?", m.content, async () => {
-          await Ace.Store.deleteMemory(m.id); h.close(); UI.openMemory(); UI.toast("Forgotten 🕳️", "info");
+          await Ace.Store.deleteMemory(m.id); h.close(); UI.openMemory(); UI.toast("Forgotten", "info");
         });
         acts.append(pin, edit, del);
         row.append(main, acts);
@@ -231,23 +236,24 @@ window.Ace = window.Ace || {};
       });
     });
     if (!mems.length) b.append(Ace.el("div", "sb-empty", "Nothing yet — chat for a bit and Ace will start remembering the important stuff."));
-    const h = modal("🧠 Memory", b);
+    const h = modal("Memory", b);
   };
 
   /* =============== MODEL INFO POPOVER =============== */
   function modelPopover() {
     const b = Ace.el("div", "modelpop");
+    const freeTag = (id) => { const m = Ace.modelById(id) || {}; return m.free ? "free" : "premium*"; };
     b.innerHTML = `
       <div class="modelpop-t">Smart routing <span class="muted">· auto-picks per task</span></div>
-      ${row("💬", "Casual chat", "GLM-4.5 Flash", "free")}
-      ${row("💡", "Think toggle", (Ace.modelById(Ace.ROUTE.think) || {}).label, Ace.modelById(Ace.ROUTE.think || "") && Ace.modelById(Ace.ROUTE.think).free ? "free" : "premium*")}
-      ${row("🌐", "Web search", "GLM-4.5 Flash + live search", "free")}
-      ${row("🖼️", "Images", "GLM-4.6V Flash", "free")}
-      ${row("🛠️", "Work builder", (Ace.modelById(Ace.ROUTE.work) || {}).label, Ace.modelById(Ace.ROUTE.work || "") && Ace.modelById(Ace.ROUTE.work).free ? "free" : "premium*")}
-      ${row("🔬", "Deep research", (Ace.modelById(Ace.ROUTE.deep) || {}).label, "premium*")}
-      <div class="modelpop-note">* premium models auto-fall back to the free Flash when your key has no balance — everything keeps working.</div>`;
+      ${row("spark", "Casual chat", "GLM-4.5 Flash · reasoning off", "free")}
+      ${row("bulb", "Think toggle", "GLM-4.5 Flash · reasoning on", "free")}
+      ${row("globe", "Web search", "GLM-4.5 Flash + live search", "free")}
+      ${row("img", "Images", "GLM-4.6V Flash", "free")}
+      ${row("code", "Work builder", (Ace.modelById(Ace.ROUTE.work) || {}).label, freeTag(Ace.ROUTE.work))}
+      ${row("search", "Deep research", (Ace.modelById(Ace.ROUTE.deep) || {}).label, freeTag(Ace.ROUTE.deep))}
+      <div class="modelpop-note">Everything runs on free models by default — no Z.ai balance needed. * Premium picks in Settings auto-fall back to free Flash when your key lacks balance.</div>`;
     function row(ic, task, model, tag) {
-      return `<div class="modelpop-row"><span class="mp-ic">${ic}</span><span class="mp-task">${task}</span><span class="mp-model">${Ace.esc(model || "")}</span><span class="mp-tag ${tag === "free" ? "ok" : ""}">${tag}</span></div>`;
+      return `<div class="modelpop-row"><span class="mp-ic">${Ace.ICON(ic, 15)}</span><span class="mp-task">${task}</span><span class="mp-model">${Ace.esc(model || "")}</span><span class="mp-tag ${tag === "free" ? "ok" : ""}">${tag}</span></div>`;
     }
     modal("Models", b);
   }
@@ -266,12 +272,12 @@ window.Ace = window.Ace || {};
       go.disabled = true; go.textContent = "Checking key…";
       const r = await Ace.API.testKey(k);
       go.disabled = false; go.textContent = "Launch Ace →";
-      if (!r.ok) { msg.textContent = "❌ " + Ace.API.friendlyError(r.error); return; }
+      if (!r.ok) { msg.textContent = Ace.API.friendlyError(r.error); return; }
       Ace.API.setKey(k);
       await Ace.Store.setSharedKey(k).catch(() => {});
       localStorage.setItem("ace:v1:key", k);
       hideSetup();
-      UI.toast("Connected — GLM-4.5 Flash responded ✓", "ok");
+      UI.toast("Connected — GLM-4.5 Flash responded", "ok");
     };
     inp.onkeydown = (e) => { if (e.key === "Enter") go.click(); };
   }
@@ -396,7 +402,7 @@ window.Ace = window.Ace || {};
     const mems = await Ace.Memory.all().catch(() => []);
     const el = $("memCount"); if (el) el.textContent = mems.length;
     const hint = $("memHint");
-    if (hint) hint.textContent = mems.length ? `🧠 ${mems.length} memories active` : "";
+    if (hint) hint.textContent = mems.length ? `${mems.length} memories active` : "";
   }
 
   /* =============== BOOT =============== */

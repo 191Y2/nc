@@ -2,6 +2,10 @@
    Ace — chat.js · conversations: sidebar, rendering, send flow,
    regenerate/edit, export. Work-mode message handling lives in
    work.js; this file powers Chat mode + shared plumbing.
+   Includes the live TASK STOPWATCH: every phase of an answer
+   (Searching the web · 3.4s, Thinking · 2.1s, Creating quiz UI ·
+   7.9s …) streams into a chip row under the message header, with
+   a "Worked for 12.5s" total when it finishes.
    ============================================================ */
 "use strict";
 window.Ace = window.Ace || {};
@@ -38,7 +42,7 @@ window.Ace = window.Ace || {};
         "No chats yet. Start one — I remember what matters."));
       return;
     }
-    if (pinned.length) list.append(section("📌 Pinned", pinned));
+    if (pinned.length) list.append(section("Pinned", pinned));
     const groups = {};
     rest.forEach(c => { const g = groupLabel(c.updatedAt || c.createdAt || 0); (groups[g] = groups[g] || []).push(c); });
     const ORDER = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"];
@@ -88,7 +92,6 @@ window.Ace = window.Ace || {};
   };
 
   function renameChat(chat) {
-    const itEl = Array.from(document.querySelectorAll(".sb-item")).find(n => n.textContent.includes(chat.title || ""));
     Ace.UI.prompt("Rename chat", chat.title || "", async (val) => {
       if (!val || !val.trim()) return;
       chat.title = val.trim().slice(0, 60);
@@ -131,17 +134,17 @@ window.Ace = window.Ace || {};
     if (!wrap) return;
     wrap.innerHTML = "";
     const chips = mode === "work"
-      ? [["🎮", "Build a game", "Build a polished browser game — canvas, 60fps, score, restart, mobile-friendly. Pick a fun concept and go."],
-         ["🧮", "Study tool app", "Build a study tool app — focus timer + task list + pomodoro stats, saved locally, clean design."],
-         ["📊", "Dashboard site", "Build a sleek personal dashboard site — clock, quick links, notes with localStorage, dark mode."],
-         ["🎯", "Flashcard app", "Build a flashcards web app — decks, flip animation, known/review tracking, shuffle. Make it beautiful."]]
-      : [["📝", "Essay help", "Help me write an essay — ask me for my topic, then guide me with structure and a strong intro."],
-         ["🧠", "Quiz me", "Quiz me on something I'm studying — ask what subject first, then build me quizzes."],
-         ["📚", "Study guide", "Make me a study guide with key terms, a timeline, and a study plan."],
-         ["📷", "Solve from photo", ""],
-         ["🌐", "Search the web", ""]];
+      ? [["code", "Build a game", "Build a polished browser game — canvas, 60fps, score, restart, mobile-friendly. Pick a fun concept and go."],
+         ["clock", "Study tool app", "Build a study tool app — focus timer + task list + pomodoro stats, saved locally, clean design."],
+         ["stats", "Dashboard site", "Build a sleek personal dashboard site — clock, quick links, notes with localStorage, dark mode."],
+         ["spark", "Flashcard app", "Build a flashcards web app — decks, flip animation, known/review tracking, shuffle. Make it beautiful."]]
+      : [["edit", "Essay help", "Help me write an essay — ask me for my topic, then guide me with structure and a strong intro."],
+         ["bulb", "Quiz me", "Quiz me on something I'm studying — ask what subject first, then build me quizzes."],
+         ["img", "Study guide", "Make me a study guide with key terms, a timeline, and a study plan."],
+         ["img", "Solve from photo", ""],
+         ["globe", "Search the web", ""]];
     chips.forEach(([icon, label, fill]) => {
-      const ch = Ace.el("button", "chip", `${icon} ${label}`);
+      const ch = Ace.el("button", "chip", Ace.ICON(icon, 15) + " " + label);
       ch.onclick = () => {
         if (label === "Solve from photo") { const fi = $("fileInput"); fi && fi.click(); return; }
         if (label === "Search the web") { Ace.App.setWeb(true); const i = $("input"); i.placeholder = "Ask about anything current…"; i.focus(); return; }
@@ -149,6 +152,53 @@ window.Ace = window.Ace || {};
       };
       wrap.append(ch);
     });
+  }
+
+  /* ================= TASK STOPWATCH =================
+     ai.tasks = [{k, label, t0, t1}] — t1 null while running.
+     Rendered as chips; a 120ms interval re-renders the live one so
+     the seconds tick in real time. */
+  const fmtSecs = (ms) => ((ms || 0) / 1000).toFixed(1);
+
+  function renderTaskBar(m) {
+    const tasks = m.tasks || [];
+    if (!tasks.length) return null;
+    const running = m.streaming !== false && tasks.some(t => !t.t1);
+    const bar = Ace.el("div", "taskbar");
+    tasks.forEach((t, i) => {
+      const live = !t.t1;
+      const ms = live ? Date.now() - t.t0 : t.t1 - t.t0;
+      const chip = Ace.el("span", "task-chip" + (live ? " run" : " done"),
+        `${live ? '<span class="task-dot"></span>' : Ace.ICON("check", 11)}<span class="task-lbl">${Ace.esc(t.label)}</span><span class="task-time">${fmtSecs(ms)}s</span>`);
+      chip.dataset.taskIdx = i;
+      bar.append(chip);
+    });
+    const last = tasks[tasks.length - 1];
+    if (!running && last && last.t1) {
+      const total = tasks.reduce((a, t) => a + ((t.t1 || t.t0) - t.t0), 0);
+      const tot = Ace.el("span", "task-total", `${Ace.ICON("clock", 11)} Worked for ${fmtSecs(total)}s`);
+      bar.append(tot);
+    }
+    return bar;
+  }
+
+  const taskTimers = {};
+  function startTaskTicker(m) {
+    stopTaskTicker(m);
+    taskTimers[m.id] = setInterval(() => {
+      const node = document.querySelector(`[data-mid="${m.id}"] .taskbar`);
+      if (!node) return;
+      const bar = renderTaskBar(m);
+      if (bar) node.replaceWith(bar);
+      C.scrollBottom();
+    }, 120);
+  }
+  function stopTaskTicker(m) {
+    clearInterval(taskTimers[m.id]); delete taskTimers[m.id];
+  }
+  function finishTasks(m) {
+    (m.tasks || []).forEach(t => { if (!t.t1) t.t1 = Date.now(); });
+    stopTaskTicker(m);
   }
 
   function renderMessage(m) {
@@ -196,6 +246,10 @@ window.Ace = window.Ace || {};
 
     col.append(head);
 
+    // task stopwatch chips
+    const tb = renderTaskBar(m);
+    if (tb) col.append(tb);
+
     if (m.reasoning) {
       const t = Ace.el("details", "thinking");
       t.innerHTML = `<summary>${Ace.ICON("bulb", 13)} Reasoning</summary><div class="thinking-body">${Ace.esc(m.reasoning).replace(/\n/g, "<br>")}</div>`;
@@ -226,8 +280,8 @@ window.Ace = window.Ace || {};
       regen.title = "Regenerate";
       regen.onclick = () => C.regenerate(m.id);
       acts.append(regen);
-      const up = Ace.el("button", "mact" + (m.rating === 1 ? " on" : ""), "👍");
-      const down = Ace.el("button", "mact" + (m.rating === -1 ? " on" : ""), "👎");
+      const up = Ace.el("button", "mact" + (m.rating === 1 ? " on" : ""), Ace.ICON("thumbUp", 15));
+      const down = Ace.el("button", "mact" + (m.rating === -1 ? " on" : ""), Ace.ICON("thumbDown", 15));
       up.title = "Good answer"; down.title = "Bad answer";
       up.onclick = () => rate(m, 1); down.onclick = () => rate(m, -1);
       acts.append(up, down);
@@ -380,17 +434,39 @@ window.Ace = window.Ace || {};
     await runCompletion(chat);
   };
 
+  /* task helpers bound to an assistant message */
+  function taskBegin(ai, k, label) {
+    ai.tasks = ai.tasks || [];
+    const ex = ai.tasks.find(t => t.k === k);
+    if (ex) { if (ex.t1) { ex.t1 = null; ex.label = label; } }
+    else ai.tasks.push({ k, label, t0: Date.now(), t1: null });
+    if (ai.streaming !== false) startTaskTicker(ai);
+    C.rerenderMessage(ai);
+  }
+  function taskEnd(ai, k) {
+    const t = (ai.tasks || []).find(t => t.k === k && !t.t1);
+    if (t) t.t1 = Date.now();
+    C.rerenderMessage(ai);
+  }
+  C.taskBegin = taskBegin;   // used by work.js (agentic trace timings)
+  C.taskEnd = taskEnd;
+  C.finishTasks = finishTasks;
+
   async function runCompletion(chat, retryOf) {
     C.sending = true;
     Ace.App.setSending(true);
+    const t0 = Date.now();
     const ai = retryOf || {
       id: Ace.uid(), role: "assistant", content: "", createdAt: Date.now(),
       model: "", flags: { think: Ace.App.toggles.think, web: Ace.App.toggles.web, deep: Ace.App.toggles.deep },
-      uiStates: {}
+      uiStates: {}, tasks: []
     };
+    ai.tasks = ai.tasks || [];
     if (!retryOf) { C.messages.push(ai); }
+    ai.streaming = true;
     C.rerenderMessage(ai);
     C.scrollBottom();
+    startTaskTicker(ai);
 
     const lastUser = [...C.messages].reverse().find(m => m.role === "user");
     const userText = (lastUser && lastUser.content) || "";
@@ -400,7 +476,7 @@ window.Ace = window.Ace || {};
       // context assembly
       const settings = await Ace.Store.getSettings();
       const memories = await Ace.Memory.recall(userText).catch(() => []);
-      const memHint = $("memHint"); if (memHint) memHint.textContent = memories.length ? `🧠 ${memories.length} memories in context` : "";
+      const memHint = $("memHint"); if (memHint) memHint.textContent = memories.length ? `${memories.length} memories in context` : "";
 
       const autoWeb = settings.autoWebSearch !== false && !hasImages && !Ace.App.toggles.web &&
         /\b(latest|today|right now|currently|news|prices?)\b|\bwho won\b|\bweather\b|\b(up ?to ?date|update on)\b|\b(stock|election|released|coming out|game last night)\b|20(2[5-9]|3[0-9])/i.test(userText);
@@ -411,11 +487,17 @@ window.Ace = window.Ace || {};
       if (useDeep) {
         await runDeep(chat, ai, userText);
       } else {
-        // free live references (Wikipedia + DDG) — real citations even on free keys
+        /* ---- REAL web search (blocks the reply; stopwatch shows live) ---- */
         let refs = [];
-        if (useWeb) {
-          refs = await Ace.API.freeWebSearch(userText).catch(() => []);
+        if (useWeb && !hasImages) {
+          taskBegin(ai, "search", "Searching the web");
+          refs = await Ace.API.searchWeb(userText).catch(() => []);
+          taskEnd(ai, "search");
+          if (!refs.length && Ace.App.toggles.web)
+            Ace.UI.toast("The web search came back empty — Ace will answer from what it knows and say so", "warn");
         }
+        ai.flags.web = useWeb && !!refs.length; // honest flag: only claim it if it actually happened
+
         const sysPrompt = Ace.PROMPTS.chat({
           webSearch: useWeb, refs, memories, summary: chat.summary,
           quizHint: /quiz|test me|flash ?card|drill me|practice (test|questions?)|study for/i.test(userText),
@@ -430,43 +512,58 @@ window.Ace = window.Ace || {};
           }));
         history.unshift({ role: "system", content: sysPrompt });
 
-        let model, chain, tools = null, thinking = undefined;
-        if (hasImages) { model = Ace.ROUTE.vision; chain = Ace.FALLBACKS.vision; }
-        else if (useWeb) { model = Ace.ROUTE.web; chain = [Ace.ROUTE.web]; tools = Ace.API.WEB_TOOLS; thinking = "disabled"; }
-        else if (Ace.App.toggles.think) { model = Ace.ROUTE.think; chain = Ace.FALLBACKS.text; }
-        else { model = Ace.ROUTE.chat; chain = [Ace.ROUTE.chat]; }
+        /* routing: free-first. Think = reasoning ON (same free model).
+           Images route to the vision model. Everything else runs with
+           thinking OFF for instant first tokens. */
+        let model, chain, thinking = "disabled";
+        if (hasImages) { model = Ace.ROUTE.vision; chain = Ace.chainFor(Ace.ROUTE.vision, "vision"); thinking = "disabled"; }
+        else if (Ace.App.toggles.think) { model = Ace.ROUTE.think; chain = Ace.chainFor(Ace.ROUTE.think, "text"); thinking = "enabled"; }
+        else { model = Ace.ROUTE.chat; chain = Ace.chainFor(Ace.ROUTE.chat, "text"); }
 
-        const streamOpts = {
-          model, fallbackChain: chain, taskKey: "chat", tools, thinking,
-          messages: history, signal: (C.abort = new AbortController()).signal
-        };
-        if (tools) { streamOpts.temperature = 0.5; streamOpts.maxTokens = 4000; }
-
+        let streamDone = false; // ignore any late delta racing after completion
         const onDelta = (content, reasoning) => {
+          if (streamDone) return;
           ai.content = content; ai.reasoning = reasoning; ai.streaming = true;
+          // phase detection for the stopwatch
+          if (reasoning && !content) taskBegin(ai, "think", "Thinking");
+          else if (content) {
+            if ((ai.tasks || []).some(t => t.k === "think" && !t.t1)) taskEnd(ai, "think");
+            const opens = (content.match(/```/g) || []).length;
+            if (opens % 2 === 1) { // we're inside an open fence right now
+              const fm = content.slice(content.lastIndexOf("```")).match(/^```(\w+)/);
+              if (fm && Ace.Blocks.isBlock(fm[1]))
+                taskBegin(ai, "ui", "Creating " + (/quiz/.test(fm[1]) ? "quiz" : fm[1]) + " UI");
+              else taskBegin(ai, "ui", "Writing code");
+            } else {
+              taskBegin(ai, "write", "Writing");
+            }
+          }
           C.rerenderMessage(ai, true);
           C.scrollBottom();
         };
-        const res = tools
-          ? await Ace.API.searchChat(Object.assign(streamOpts, { onDelta }))
-          : await Ace.API.stream(Object.assign(streamOpts, { onDelta }));
+        const res = await Ace.API.stream({
+          model, fallbackChain: chain, taskKey: "chat", thinking,
+          messages: history, signal: (C.abort = new AbortController()).signal,
+          onDelta
+        });
+        streamDone = true;
 
         ai.content = res.content; ai.reasoning = res.reasoning || "";
         ai.model = res.model; ai.fallbackUsed = res.fallbackUsed;
         ai.streaming = false;
-        const toolSources = (res.sources && res.sources.length) ? res.sources : null;
-        ai.searchResult = toolSources || (useWeb && refs.length ? refs : null);
+        ai.searchResult = (useWeb && refs.length) ? refs : null;
+        finishTasks(ai);
         C.rerenderMessage(ai);
         await Ace.Store.addMessage(chat.id, ai);
       }
 
-      // background: memory + summary
+      // background: memory + summary (never blocks the reply)
       Ace.Memory.extract(C.messages.slice(0, -1), chat.id).then(r => {
         if (r && (r.added || r.updated || r.deleted)) {
           const parts = [];
           if (r.added) parts.push(`${r.added} new`);
           if (r.updated) parts.push(`${r.updated} updated`);
-          Ace.UI.toast(`🧠 Memory: ${parts.join(", ")}`, "ok");
+          Ace.UI.toast(`Memory: ${parts.join(", ")}`, "ok");
         }
       }).catch(() => {});
       if (C.messages.length >= Ace.SUMMARIZE_AFTER && C.messages.length % 8 === 0) {
@@ -474,6 +571,7 @@ window.Ace = window.Ace || {};
       }
       await Ace.Store.updateChat(chat.id, { msgCount: C.messages.length, updatedAt: Date.now() });
     } catch (e) {
+      finishTasks(ai);
       if (e.name === "AbortError") {
         ai.streaming = false; ai.content = ai.content || "*(stopped)*";
         C.rerenderMessage(ai);
@@ -494,29 +592,21 @@ window.Ace = window.Ace || {};
   async function runDeep(chat, ai) {
     const lastUser = [...C.messages].reverse().find(m => m.role === "user");
     const query = (lastUser && lastUser.content) || "";
-    ai.flags.deep = true; ai.flags.web = true;
-    ai.deepSteps = [];
-    const traceEl = () => {
-      const prev = document.querySelector(`[data-mid="${ai.id}"] .deep-steps`);
-      if (prev) prev.remove();
-      const box = Ace.el("div", "deep-steps");
-      ai.deepSteps.forEach(s => box.append(Ace.el("div", "deep-step " + (s.state === "run" ? "run" : "done"),
-        `${s.state === "run" ? '<span class="spin"></span>' : Ace.ICON("check", 13)} ${Ace.esc(s.label)}`)));
-      const msgEl = document.querySelector(`[data-mid="${ai.id}"] .msg-head`);
-      if (msgEl && msgEl.nextSibling) msgEl.parentNode.insertBefore(box, msgEl.nextSibling);
-      C.scrollBottom();
-    };
+    ai.flags.deep = true;
+    ai.flags.web = true;
     const res = await Ace.API.deepResearch({
-      query, chain: Ace.FALLBACKS.text, signal: (C.abort = new AbortController()).signal,
+      query, chain: Ace.chainFor(Ace.ROUTE.deep, "text"),
+      signal: (C.abort = new AbortController()).signal,
       onStep: (label, state) => {
-        const ex = ai.deepSteps.find(s => s.label.startsWith(label.split(" —")[0]));
-        if (ex) { ex.label = label; ex.state = state; } else ai.deepSteps.push({ label, state });
-        traceEl();
+        const k = "step-" + label.split(" ")[0].toLowerCase();
+        if (state === "run") taskBegin(ai, k, label);
+        else taskEnd(ai, k);
       }
     });
-    ai.content = res.report; ai.model = Ace.ROUTE.deep;
+    ai.content = res.report; ai.model = res.model || Ace.ROUTE.deep;
     ai.searchResult = res.sources; ai.streaming = false;
     ai.reasoning = "";
+    finishTasks(ai);
     C.rerenderMessage(ai);
     await Ace.Store.addMessage(chat.id, ai);
   }
@@ -526,14 +616,14 @@ window.Ace = window.Ace || {};
     if (C.sending) return;
     const idx = C.messages.findIndex(m => m.id === msgId);
     if (idx < 0) return;
-    const target = C.messages[idx];
-    // find the user message before it
-    let uIdx = idx;
-    while (uIdx >= 0 && C.messages[uIdx].role !== "user") uIdx--;
-    if (uIdx < 0) return;
-    // drop this assistant msg and everything after it
-    C.messages = C.messages.slice(0, uIdx + 1);
-    await runCompletion(C.activeChat);
+    // drop this assistant msg and everything after it, keep the user turn
+    C.messages = C.messages.slice(0, idx);
+    const lastUser = [...C.messages].reverse().find(m => m.role === "user");
+    if (C.activeChat && (C.activeChat.mode === "work") && lastUser && Ace.Work && !Ace.Work.running) {
+      await Ace.Work.run(C.activeChat, lastUser.content || "");
+    } else {
+      await runCompletion(C.activeChat);
+    }
   };
 
   C.editUser = (msgId) => {

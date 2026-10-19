@@ -1,15 +1,19 @@
 /* ============================================================
    Ace — work.js · AGENTIC BUILDER (Work mode)
    Pipeline: PLAN → BUILD → REVIEW → (FIX → BUILD)² → SHIP
-   Each phase streams into a live agent trace. Artifacts are
-   single-file HTML apps/games previewed in a sandboxed iframe,
-   downloadable, and iterable ("make X better").
+   Each phase streams into a live agent trace AND feeds the task
+   stopwatch chips (Planning the build · 1.3s → Building v1 · 42.8s
+   → … → Worked for 68.7s). Artifacts are single-file HTML apps/
+   games previewed in a sandboxed iframe, downloadable, iterable.
+   Runs on the free GLM-4.5 Flash (thinking off = no 1210 errors,
+   no balance needed, complete HTML apps).
    ============================================================ */
 "use strict";
 window.Ace = window.Ace || {};
 (function () {
   const $ = (id) => document.getElementById(id);
   const W = { running: false };
+  const fmtSecs = (ms) => ((ms || 0) / 1000).toFixed(1);
 
   /* ---------- trace rendering (called from chat.js renderMessage) ---------- */
   W.renderTrace = (m) => {
@@ -32,7 +36,8 @@ window.Ace = window.Ace || {};
         : s.state === "done" ? Ace.ICON("check", 13)
         : s.state === "fail" ? Ace.ICON("warn", 13) : Ace.ICON("chev", 13);
       const step = Ace.el("details", "work-step-d");
-      step.innerHTML = `<summary><span class="ws-ic ${s.state || ""}">${icon}</span><span class="ws-lbl">${Ace.esc(s.label)}</span>${s.note ? `<span class="ws-note">${Ace.esc(s.note)}</span>` : ""}</summary>
+      const secs = s.ms != null ? `<span class="ws-time">${fmtSecs(s.ms)}s</span>` : "";
+      step.innerHTML = `<summary><span class="ws-ic ${s.state || ""}">${icon}</span><span class="ws-lbl">${Ace.esc(s.label)}</span>${secs}${s.note ? `<span class="ws-note">${Ace.esc(s.note)}</span>` : ""}</summary>
         ${s.detail ? `<div class="ws-detail">${s.detail}</div>` : ""}`;
       if (s.state === "run") step.open = true;
       wrap.append(step);
@@ -56,10 +61,11 @@ window.Ace = window.Ace || {};
        <div class="artifact-badges"><span class="badge">v${a.v}</span>${a.score ? `<span class="badge ok">review ${a.score}/10</span>` : ""}<span class="badge">${((a.code || "").length / 1024).toFixed(1)} KB</span></div>`);
     const acts = Ace.el("div", "artifact-acts");
     const run = Ace.el("button", "btn btn-primary", Ace.ICON("play", 14) + "Open app");
+    let blobUrl = null;
     run.onclick = () => {
-      const blob = new Blob([a.code], { type: "text/html" });
-      window.open(URL.createObjectURL(blob), "_blank");
-      setTimeout(() => URL.revokeObjectURL(blob.url || ""), 8000);
+      if (blobUrl) { window.open(blobUrl, "_blank"); return; }
+      blobUrl = URL.createObjectURL(new Blob([a.code], { type: "text/html" }));
+      window.open(blobUrl, "_blank");
     };
     const dl = Ace.el("button", "btn btn-ghost", Ace.ICON("download", 14) + "Download");
     dl.onclick = () => {
@@ -67,6 +73,7 @@ window.Ace = window.Ace || {};
       b.href = URL.createObjectURL(new Blob([a.code], { type: "text/html" }));
       b.download = (a.title || "ace-app").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").toLowerCase() + ".html";
       b.click();
+      setTimeout(() => URL.revokeObjectURL(b.href), 8000);
     };
     const view = Ace.el("button", "btn btn-ghost", Ace.ICON("code", 14) + "Code");
     view.onclick = () => {
@@ -93,13 +100,21 @@ window.Ace = window.Ace || {};
     const s = t.steps.find(x => x.k === k);
     if (!patch) delete s.live;
     Object.assign(s, patch || {}, { label: label || s.label });
+    if (patch && patch.state === "done") { delete s.live; if (!s.ms) s.ms = Date.now() - (s._t0 || Date.now()); }
     Ace.Chat.rerenderMessage(ai);
     Ace.Chat.scrollBottom();
   };
   const addStep = (ai, k, label) => {
-    ai.workTrace.steps.push({ k, label, state: "run" });
+    ai.workTrace.steps.push({ k, label, state: "run", _t0: Date.now() });
+    Ace.Chat.taskBegin(ai, k, label);
     Ace.Chat.rerenderMessage(ai);
     Ace.Chat.scrollBottom();
+  };
+  const endStep = (ai, k, label, patch) => {
+    const s = ai.workTrace.steps.find(x => x.k === k);
+    if (s && !s.ms) s.ms = Date.now() - (s._t0 || Date.now());
+    step(ai, k, label, patch);
+    Ace.Chat.taskEnd(ai, k);
   };
   const updateLive = (ai, k, label, code) => {
     const node = document.querySelector(`[data-mid="${ai.id}"] .work-live-code`);
@@ -110,9 +125,9 @@ window.Ace = window.Ace || {};
 
   function extractHTML(text) {
     const segs = Ace.MD.split(text || "");
-    const fence = segs.find(s => s.kind === "fence" && (s.lang === "html" || s.lang === "" ) && /<!DOCTYPE|<html/i.test(s.body));
+    const fence = segs.find(s => s.kind === "fence" && (s.lang === "html" || s.lang === "") && /<!DOCTYPE|<html/i.test(s.body));
     if (fence) return fence.body.trim();
-    const m = (text || "").match(/<!DOCTYPE[\s\S]*<\/html>/i);
+    const m = (text || "").match(/<!DOCTYPE[\s\S]*<\/html>/i) || (text || "").match(/<html[\s\S]*<\/html>/i);
     if (m) return m[0].trim();
     return null;
   }
@@ -122,19 +137,17 @@ window.Ace = window.Ace || {};
     if (sysPrompt) msgs.push({ role: "system", content: sysPrompt });
     msgs.push({ role: "user", content: prompt });
     return Ace.API.stream({
-      model: Ace.ROUTE.work, fallbackChain: Ace.FALLBACKS.work, taskKey: "work",
+      model: Ace.ROUTE.work, fallbackChain: Ace.chainFor(Ace.ROUTE.work, "work"), taskKey: "work",
       temperature: temp, maxTokens: maxTok, messages: msgs, signal,
-      thinking: "disabled" // structured-output tasks: don't burn tokens on reasoning
+      thinking: "disabled" // structured-output tasks: don't burn tokens on reasoning.
+      // (If a premium model is picked in Settings and it refuses thinking:disabled
+      //  with error 1210, the API client automatically retries with thinking on.)
     });
   }
 
-  function parseJSONLoose(text) {
-    const m = (text || "").match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    try { return JSON.parse(m[0]); } catch (e) {
-      try { return JSON.parse(m[0].replace(/,\s*([}\]])/g, "$1")); } catch (e2) { return null; }
-    }
-  }
+  const parseJSONLoose = (text) => Ace.Blocks.parse(text) ||
+    (() => { const m = (text || "").match(/\{[\s\S]*\}/); if (!m) return null;
+      try { return JSON.parse(m[0]); } catch (e) { return null; } })();
 
   /* ---------- main entry (called by Chat.send in work mode) ---------- */
   W.send = async (text, images) => {
@@ -177,9 +190,10 @@ window.Ace = window.Ace || {};
 
     const ai = {
       id: Ace.uid(), role: "assistant", content: "", createdAt: Date.now(), model: "",
-      flags: {}, uiStates: {},
+      flags: {}, uiStates: {}, tasks: [],
       workTrace: { steps: [], versions: [] }, artifacts: null
     };
+    ai.streaming = true;
     Ace.Chat.messages.push(ai);
     Ace.Chat.rerenderMessage(ai);
     Ace.Chat.scrollBottom();
@@ -194,14 +208,14 @@ window.Ace = window.Ace || {};
         const r = await callModel(Ace.PROMPTS.workPlanner(request), null, 0.35, 1200, signal);
         plan = parseJSONLoose(r.content) || { title: "Custom app", type: "app", oneLiner: request.slice(0, 100), features: [request.slice(0, 60)], steps: [{ name: "Build" }] };
         ai.workTrace.plan = plan;
-        step(ai, "plan", `Planned: ${plan.title}`, { state: "done", note: plan.type,
+        endStep(ai, "plan", `Planned: ${plan.title}`, { state: "done", note: plan.type,
           detail: `<b>${Ace.esc(plan.oneLiner || "")}</b><br>` + (plan.features || []).map(f => "• " + Ace.esc(f)).join("<br>") });
         ai.model = r.model; ai.fallbackUsed = r.fallbackUsed;
       } else {
         plan = prior.plan || { title: prior.title, type: "app", oneLiner: request.slice(0, 100), features: [], steps: [] };
         ai.workTrace.plan = plan;
         addStep(ai, "iter", `Iterating on v${prior.v}`);
-        step(ai, "iter", `Change request: ${request.slice(0, 60)}`, { state: "done",
+        endStep(ai, "iter", `Change request: ${request.slice(0, 60)}`, { state: "done",
           detail: `Building v${v} of <b>${Ace.esc(prior.title || "the app")}</b> with your changes.` });
       }
 
@@ -210,34 +224,42 @@ window.Ace = window.Ace || {};
       for (let attempt = 0; attempt < 3; attempt++) {
         const buildK = attempt === 0 ? (prior ? "iter" : "build") : "fix";
         if (attempt > 0) addStep(ai, buildK, `Fixing ${review && review.issues && review.issues.length ? review.issues.length + " issue(s)" : "issues"}`);
-        ai.workTrace.steps.find(s => s.k === buildK) && step(ai, buildK, attempt === 0 ? `Building v${v}` : `Rebuilding v${v} (pass ${attempt + 1})`, { state: "run" });
+        else if (attempt === 0 && !ai.workTrace.steps.find(s => s.k === buildK)) addStep(ai, buildK, `Building v${v}`);
+        step(ai, buildK, attempt === 0 ? `Building v${v}` : `Rebuilding v${v} (pass ${attempt + 1})`, {
+          state: "run", live: { label: `Building v${v}`, pct: "0k chars" } });
+        Ace.Chat.taskBegin(ai, buildK, attempt === 0 ? `Building v${v}` : `Fixing v${v}`);
 
         const buildPrompt = Ace.PROMPTS.workBuilder(plan, attempt > 0 ? code : prevCode, feedback);
         let full = "";
+        const buildT0 = Date.now();
         const res = await Ace.API.stream({
-          model: Ace.ROUTE.work, fallbackChain: Ace.FALLBACKS.work, taskKey: "work",
-          temperature: 0.55, maxTokens: 26000, signal,
+          model: Ace.ROUTE.work, fallbackChain: Ace.chainFor(Ace.ROUTE.work, "work"), taskKey: "work",
+          temperature: 0.55, maxTokens: 16000, signal,
           messages: [{ role: "user", content: buildPrompt }],
           onDelta: (content) => {
             full = content;
-            updateLive(ai, buildK, `Building v${v} — ${(content.length / 1000).toFixed(1)}k chars`, content);
+            const secs = ((Date.now() - buildT0) / 1000).toFixed(0);
+            updateLive(ai, buildK, `Building v${v} — ${(content.length / 1000).toFixed(1)}k chars · ${secs}s`, content);
           }
         });
         code = extractHTML(res.content);
         ai.model = res.model;
 
-        // truncated output? ask the model to continue
+        // truncated output? ask the model to continue FROM WHERE IT STOPPED
         let continues = 0;
         while (!code && continues < 2) {
           continues++;
           step(ai, buildK, `Building v${v} — continuing (part ${continues + 1})`, { state: "run" });
-          const c = await callModel("Continue the HTML file EXACTLY where you stopped. Do not repeat any earlier code, do not restart, just continue until </html>.", null, 0.55, 26000, signal);
-          res.content += "\n" + c.content;
-          code = extractHTML(res.content);
+          const tail = full.slice(-7000);
+          const c = await callModel(
+            "Here is the END of the HTML file you were writing (it got cut off):\n\n```html\n" + tail + "\n```\n\nContinue the file EXACTLY where it stops — do not repeat any earlier code, do not restart, just output the continuation until `</html>`.",
+            null, 0.55, 16000, signal);
+          full += "\n" + c.content;
+          code = extractHTML(full);
         }
         if (!code) throw new Error("The builder didn't return a complete HTML file — try rephrasing what you want.");
 
-        ai.workTrace.steps.find(s => s.k === buildK) && step(ai, buildK, `Built v${v} — ${(code.length / 1024).toFixed(1)} KB of code`, {
+        endStep(ai, buildK, `Built v${v} — ${(code.length / 1024).toFixed(1)} KB of code`, {
           state: "done", note: `${(code.split("\n") || []).length} lines` });
 
         /* ---- REVIEW ---- */
@@ -246,25 +268,30 @@ window.Ace = window.Ace || {};
         const rr = await callModel(Ace.PROMPTS.workReviewer(plan, code), null, 0.25, 900, signal);
         review = parseJSONLoose(rr.content) || { verdict: "pass", score: 7, issues: [], improvements: [] };
         const issueTxt = (review.issues || []).length ? (review.issues || []).map(i => "• " + Ace.esc(String(i).slice(0, 160))).join("<br>") : "No blocking issues.";
-        step(ai, revK, `Review — ${review.score != null ? review.score + "/10" : "done"} · ${review.verdict}`, {
+        endStep(ai, revK, `Review — ${review.score != null ? review.score + "/10" : "done"} · ${review.verdict}`, {
           state: "done", note: (review.issues || []).length + " issue(s)",
           detail: issueTxt + ((review.improvements || []).length ? `<div class="ws-sub">Improvements queued:<br>${review.improvements.map(i => "• " + Ace.esc(String(i).slice(0, 140))).join("<br>")}</div>` : "") });
 
-        if (review.verdict !== "fix" || !(review.issues || []).length || attempt >= 2) break;
+        // gate: only spend a rebuild pass on real breakage. A 7+/10 with
+        // polish notes ships as-is (improvements listed for the next version).
+        const fatal = (review.issues || []).some(i => /error|crash|broken|undefined|not work|doesn'?t work|fail/i.test(String(i)));
+        if (review.verdict !== "fix" || !(review.issues || []).length || attempt >= 2 || ((review.score != null && review.score >= 7) && !fatal)) break;
         feedback = "Fix these issues:\n" + review.issues.map(i => "- " + i).join("\n") +
           "\nAlso apply improvements if trivial:\n" + (review.improvements || []).slice(0, 3).map(i => "- " + i).join("\n");
       }
 
       /* ---- SHIP ---- */
-      ai.artifacts = [{ v, title: plan.title || "App", code, lang: "html", score: review && review.score, verdict: review && review.verdict }];
+      ai.artifacts = [{ v, title: plan.title || "App", code, lang: "html", score: review && review.score, verdict: review && review.verdict, plan }];
       ai.content = `Shipped **${plan.title || "the app"}** (v${v}).\n\n${prior ? "Updated with your changes — " : ""}${review && review.score ? `Review score: **${review.score}/10**. ` : ""}Preview it below, open it full-screen, or download the file. Describe any change and I'll ship v${v + 1}.`;
       ai.streaming = false;
       addStep(ai, "ship", `Shipped v${v}`);
-      step(ai, "ship", `Shipped v${v}`, { state: "done" });
+      endStep(ai, "ship", `Shipped v${v}`, { state: "done" });
+      Ace.Chat.finishTasks(ai);
       Ace.Chat.rerenderMessage(ai);
       await Ace.Store.addMessage(chat.id, ai);
       await Ace.Store.updateChat(chat.id, { msgCount: Ace.Chat.messages.length, updatedAt: Date.now() });
     } catch (e) {
+      Ace.Chat.finishTasks(ai);
       if (e.name === "AbortError") {
         ai.streaming = false;
         ai.content = ai.content && ai.content !== "Working on it…" ? ai.content : "*(stopped)*";

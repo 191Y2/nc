@@ -1,8 +1,8 @@
-# ⚡ Ace — AI Study Copilot
+# Ace — AI Study Copilot
 
 A single-folder, **100% static** AI chat + agentic app built for school work. Runs on **GitHub Pages** (github.io), works on school Chromebooks, no server, no build step, no Node.js.
 
-Powered by **GLM models from Z.ai** — with real memory, live web references that don't hallucinate, interactive quiz UI, rich answer cards (scorecards, comparisons, stats), photo homework solving, and a **Work mode** agent that plans → builds → reviews → ships real apps and games.
+Powered by **GLM models from Z.ai** — with real memory, live web search that actually works, a per-answer **task stopwatch**, interactive quiz UI, rich answer cards (scorecards, comparisons, stats), photo homework solving, and a **Work mode** agent that plans → builds → reviews → ships real apps and games.
 
 ---
 
@@ -10,19 +10,20 @@ Powered by **GLM models from Z.ai** — with real memory, live web references th
 
 | Feature | How it works |
 |---|---|
-| 🧠 **Real memory** | After conversations, a background pass extracts durable facts about you (grade, subjects, deadlines, goals). Memories are scored by importance × recency decay × relevance, reinforced when used, and injected into every chat — **across all chats, including old ones**. Manage everything in the 🧠 Memory panel. |
-| 🌐 **Web that doesn't hallucinate** | The **Web** toggle pulls **live references from Wikipedia + DuckDuckGo** (free, no key) and forces the AI to ground claims in them with real citation chips. If the sources don't cover it, Ace says so instead of making things up. Keys with Z.ai balance also unlock the server-side `web_search` tool automatically. |
-| 🔬 **Deep research** | The **Deep** toggle breaks your question into 3–5 sub-queries, searches them in parallel, and synthesizes a cited research brief with UI cards. |
-| 🎯 **Quiz UI** | Ask to be quizzed and answers turn into **interactive quizzes** — multiple choice, multi-select, true/false, short answer — with instant feedback, explanations, scoring, retry, and a "make it harder 🔥" button. Multiple quizzes per message. |
-| 📊 **Answer cards** | Ratings and comparisons render as **scorecards** (9.7/10 style), **KPI stat grids**, **comparison tables** with winner checkmarks, **timelines**, **flashcards**, **step-by-step** guides, **vocab cards**, and **study plans** — plus normal Markdown (headings, lists, tables) for casual answers. |
-| 🖼️ **Photo homework** | Upload / **Ctrl+V paste** / drag & drop images (up to 4 per message). They route to the free **GLM-4.6V Flash** vision model. |
-| 🛠️ **Work mode (agentic builder)** | Toggle **Chat → Work**. Describe an app or game; the agent **plans → builds (single-file HTML) → self-reviews → fixes → ships** with a live sandboxed preview, full-screen run, download button, and version iteration ("make X better" → v2). |
-| 💡 **Think** toggle | Routes hard questions to the flagship model chain. |
-| 🎙️ **Voice input** | Mic button (Chrome, uses your browser's speech recognition). |
-| ☁️ **Firebase sync** | Chats + memories sync to **your** Firebase (anonymous auth). If Firebase is unreachable, the app silently saves to this device instead — it never blocks you. |
-| 🔑 **Key stays out of GitHub** | Your Z.ai API key is pasted once on first launch and stored in your Firestore (`config/secrets`) — it never ships in the repo, and everyone you share the deployed app with gets it automatically. |
+| **Real memory** | After conversations, a background pass extracts durable facts about you (grade, subjects, deadlines, goals). Memories are scored by importance × recency decay × relevance, reinforced when used, and injected into every chat — **across all chats, including old ones**. Manage everything in the Memory panel. |
+| **Web search that works** | The **Web** toggle runs a **real multi-engine search** (Bing web results + DuckDuckGo + Wikipedia full extracts + Google News for news queries), cleans your question into keyword form, caches for 5 minutes, shows a live **"Searching the web · 3.4s"** stopwatch, renders **real source chips**, and forces the AI to ground claims in what was actually found — if sources don't cover it, Ace says so instead of making things up. On GitHub Pages the search runs browser-direct (Wikipedia + DDG are CORS-open); on the preview it routes through the bundled same-origin `/api/zai/search` proxy so school firewalls can't kill it. |
+| **Task stopwatch** | Every answer shows what Ace did and how long each phase took: `Searching the web · 3.4s` → `Thinking · 2.1s` → `Writing · 6.3s` → `Creating quiz UI · 7.9s` → **`Worked for 12.5s`**. Work mode steps are timed too (`Planning the build · 1.3s`, `Building v1 · 58.9s` …). |
+| **Deep research** | The **Deep** toggle breaks your question into 3–5 sub-queries, searches them in parallel, and synthesizes a cited research brief with UI cards. |
+| **Quiz UI** | Ask to be quizzed and answers turn into **interactive quizzes** — multiple choice, multi-select, true/false, short answer — with instant feedback, explanations, scoring, retry, and a "make it harder" button. Multiple quizzes per message. A JSON-repair pipeline fixes the model's occasional malformed quiz JSON (missing colons/commas, string answers, odd types) instead of dumping raw code. |
+| **Answer cards** | Ratings and comparisons render as **scorecards** (9.7/10 style), **KPI stat grids**, **comparison tables** with winner checkmarks, **timelines**, **flashcards**, **step-by-step** guides, **vocab cards**, and **study plans** — plus normal Markdown (headings, lists, tables) for casual answers. |
+| **Photo homework** | Upload / **Ctrl+V paste** / drag & drop images (up to 4 per message). They route to the free **GLM-4.6V Flash** vision model. |
+| **Work mode (agentic builder)** | Toggle **Chat → Work**. Describe an app or game; the agent **plans → builds (single-file HTML, with live streaming code panel) → self-reviews → fixes real breakage → ships** with a sandboxed live preview, full-screen run, download button, and version iteration ("make X better" → v2). Runs on the free model — no balance needed. |
+| **Think** toggle | Same fast free model with **reasoning enabled** — you see the thinking stream and a `Thinking · X.Xs` chip. |
+| **Voice input** | Mic button (Chrome, uses your browser's speech recognition). |
+| **Firebase sync** | Chats + memories sync to **your** Firebase (anonymous auth). If Firebase is unreachable, the app silently saves to this device instead — it never blocks you. |
+| **Key stays out of GitHub** | Your Z.ai API key is pasted once on first launch and stored in your Firestore (`config/secrets`) — it never ships in the repo, and everyone you share the deployed app with gets it automatically. |
 
-**Smart model routing (auto):** casual chat → `GLM-4.5 Flash` (free) · images → `GLM-4.6V Flash` (free) · web/deep/think/work → flagship chain (`GLM-5.3` → … → free Flash fallback). If a premium model isn't covered by your key's balance, Ace **automatically falls back to the free model** and keeps working — you'll see a small notice.
+**Smart model routing (free-first, auto):** everything runs on **GLM-4.5 Flash** (free, instant — reasoning off) · images → `GLM-4.6V Flash` (free) · **Think** → GLM-4.5 Flash with reasoning on. Premium models (GLM-5.3 etc.) are available in Settings for keys with balance; on errors 1113/1211/1210 Ace **automatically falls back to the free model** and keeps working.
 
 ---
 

@@ -2,13 +2,16 @@
    Ace — blocks.js · AI UI component system
    The AI emits ```quiz / ```scorecard / etc. JSON fences; these
    render as polished interactive cards — the "AI UI" layer.
+   Includes a battle-tested JSON repair pipeline (the model sometimes
+   emits slightly broken JSON: missing colons/commas, string answers,
+   odd types — we fix or salvage instead of dumping raw code).
    All user-facing strings are escaped. State is saved per message.
    ============================================================ */
 "use strict";
 window.Ace = window.Ace || {};
 (function () {
   const esc = Ace.esc, el = Ace.el, mdInline = (s) => Ace.MD.inline(s || "");
-  const norm = (s) => String(s || "").toLowerCase().trim()
+  const norm = (s) => String(s == null ? "" : s).toLowerCase().trim()
     .replace(/[.,!?;:'"()]+/g, "").replace(/\s+/g, " ");
 
   function btn(label, cls, icon) {
@@ -16,11 +19,211 @@ window.Ace = window.Ace || {};
     return b;
   }
 
+  /* ============================================================
+     JSON REPAIR PIPELINE
+     Pass 1: strict JSON.parse
+     Pass 2: structural regex repairs (trailing commas, missing
+             colons after keys, smart quotes, unquoted keys…)
+     Pass 3: surgical salvage — extract top-level arrays/values and
+             parse them individually, dropping only the broken items
+     ============================================================ */
+  function parseLoose(body) {
+    const s = String(body == null ? "" : body).trim();
+    if (!s) return null;
+    // strip a stray markdown fence or prose around the JSON
+    // 1. strict
+    try { return JSON.parse(s); } catch (e) { /* continue */ }
+    // 2. structural repairs
+    let t = s
+      .replace(/^\s*```[a-z]*\s*/i, "").replace(/```\s*$/, "")
+      .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/,\s*([}\]])/g, "$1")                    // trailing commas
+      .replace(/}\s*{/g, "},{")                         // missing commas between objects
+      .replace(/]\s*{/g, "],{").replace(/}\s*\[/g, "},[") // missing commas obj↔arr
+      .replace(/]\s*\[/g, "],[")
+      .replace(/"\s*\n\s*"/g, '",\n"')                  // missing comma between string members
+      .replace(/([}\]"0-9truefalsnul]+)\s*\n(\s*")/g, "$1,\n$2");
+    // missing colon after keys: "answer" 1  →  "answer": 1
+    t = t.replace(/"([A-Za-z_][A-Za-z0-9_]*)"\s+(?=["\[\{\dtnf])/g, '"$1":');
+    try { return JSON.parse(t); } catch (e) { /* continue */ }
+    try { return JSON.parse(t.replace(/,\s*([}\]])/g, "$1")); } catch (e) { /* continue */ }
+    // 3. surgical salvage: pull out the biggest {...} or [...] and repair its items
+    const salved = salvage(s);
+    if (salved !== null) return salved;
+    return null;
+  }
+
+  function salvage(s) {
+    // try the largest outer object first
+    const outer = s.indexOf("{") >= 0 ? braceSlice(s, s.indexOf("{"), "{", "}") : null;
+    if (outer) {
+      const inner = outer.body.slice(1, -1); // without {}
+      const repairedObj = repairObjectBody(inner);
+      if (repairedObj) return repairedObj;
+    }
+    // try the largest array
+    const arr = s.indexOf("[") >= 0 ? braceSlice(s, s.indexOf("["), "[", "]") : null;
+    if (arr) {
+      const items = splitTop(arr.body.slice(1, -1));
+      const parsed = [];
+      items.forEach(it => {
+        const v = quickParse(it);
+        if (v !== undefined) parsed.push(v);
+      });
+      if (parsed.length >= 2) return parsed;
+    }
+    return null;
+  }
+
+  function braceSlice(s, start, open, close) {
+    let depth = 0, inStr = false, escc = false;
+    for (let i = start; i < s.length; i++) {
+      const c = s[i];
+      if (escc) { escc = false; continue; }
+      if (c === "\\") { if (inStr) escc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === open) depth++;
+      else if (c === close) { depth--; if (depth === 0) return { body: s.slice(start, i + 1), end: i + 1 }; }
+    }
+    return null;
+  }
+
+  function splitTop(s) {
+    const out = []; let depth = 0, inStr = false, escc = false, cur = "";
+    for (const c of s) {
+      if (escc) { cur += c; escc = false; continue; }
+      if (c === "\\" && inStr) { cur += c; escc = true; continue; }
+      if (c === '"') { inStr = !inStr; cur += c; continue; }
+      if (inStr) { cur += c; continue; }
+      if (c === "{" || c === "[") depth++;
+      if (c === "}" || c === "]") depth--;
+      if (c === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    if (cur.trim()) out.push(cur);
+    return out;
+  }
+
+  function quickParse(item) {
+    let t = item.trim().replace(/^,+|,+$/g, "").trim();
+    if (!t) return undefined;
+    for (const fix of [t, t.replace(/,\s*([}\]])/g, "$1"),
+        t.replace(/"([A-Za-z_][A-Za-z0-9_]*)"\s+(?=["\[\{\dtnf])/g, '"$1":')]) {
+      try { return JSON.parse(fix); } catch (e) { /* next */ }
+    }
+    return undefined;
+  }
+
+  function repairObjectBody(inner) {
+    const members = splitTop(inner);
+    const obj = {};
+    let ok = 0;
+    members.forEach(m => {
+      const v = quickParse(m);
+      if (v !== undefined) { return; } // full member already fine (shouldn't happen at top level)
+      const mm = m.match(/^"([^"]+)"\s*:\s*([\s\S]*)$/);
+      if (mm) {
+        let val = quickParse(mm[2]);
+        if (val === undefined && /^\[[\s\S]*\]?\s*$/.test(mm[2].trim())) {
+          // array with a broken item → salvage items individually, keep the good ones
+          const innerArr = mm[2].trim().replace(/^\[/, "").replace(/\]\s*$/, "");
+          const items = splitTop(innerArr).map(quickParse).filter(x => x !== undefined);
+          if (items.length) val = items;
+        }
+        if (val === undefined && /^"[\s\S]*"?$/.test(mm[2].trim())) {
+          const raw = mm[2].trim();
+          const unq = raw.replace(/^"+/, "").replace(/"+$/, "");
+          if (unq && !/[[\]{}\u0000-\u001f]/.test(unq.replace(/\\./g, ""))) { val = unq; } // salvage as string
+        }
+        if (val !== undefined) { obj[mm[1]] = val; ok++; }
+      }
+    });
+    return ok ? obj : null;
+  }
+
+  /* ============================================================
+     QUIZ DATA NORMALIZATION
+     The model writes answers in many shapes: index (2), string index
+     ("2"), letter ("B"), full option text, tf as "true"/true, multi
+     answers as single number, odd type names… we coerce everything.
+     ============================================================ */
+  function normType(t) {
+    t = String(t || "").toLowerCase().replace(/[\s-]+/g, "_");
+    if (/mcq|multiple_choice|choice|single|radio|mc$/.test(t)) return "mcq";
+    if (/multi|select_all|checkbox|multiple_response/.test(t)) return "multi";
+    if (/tf|true_false|boolean|bool/.test(t)) return "tf";
+    if (/short|open|input|fill|text|free|written/.test(t)) return "short";
+    return (t ? "mcq" : null);
+  }
+  function normAnswer(q, type, choices) {
+    let a = q.answer ?? q.correct ?? q.ans ?? q.a;
+    if (type === "tf") {
+      if (typeof a === "boolean") return a ? 0 : 1;
+      const s = String(a).toLowerCase().trim();
+      return (s === "false" || s === "f" || s === "0" || s === "no") ? 1 : 0;
+    }
+    if (type === "mcq") {
+      if (typeof a === "number" && a >= 0 && a < choices.length) return a;
+      const s = String(a == null ? "" : a).trim();
+      if (/^\d+$/.test(s)) { const n = +s; if (n >= 0 && n < choices.length) return n; }
+      const letter = s.toUpperCase().match(/^([A-H])\b/);
+      if (letter) { const n = letter[1].charCodeAt(0) - 65; if (n >= 0 && n < choices.length) return n; }
+      const idx = choices.findIndex(c => norm(c) === norm(s));
+      if (idx >= 0) return idx;
+      const idx2 = choices.findIndex(c => norm(c).includes(norm(s)) && norm(s).length > 2);
+      if (idx2 >= 0) return idx2;
+      return 0;
+    }
+    return a;
+  }
+  function normalizeQuiz(d) {
+    if (!d || typeof d !== "object") return null;
+    if (Array.isArray(d)) d = { questions: d };
+    const qs = [];
+    (d.questions || d.items || d.qs || []).forEach(q => {
+      if (!q || typeof q !== "object" || !(q.q || q.question || q.prompt)) return;
+      const q2 = {
+        q: String(q.q || q.question || q.prompt),
+        options: Array.isArray(q.options) ? q.options.filter(o => o != null).map(String)
+          : (q.options != null ? [String(q.options)] : null),
+        explain: q.explain || q.explanation || q.why || null,
+        hint: q.hint || null
+      };
+      q2.type = normType(q.type || (q2.options ? "mcq" : "short")) || "short";
+      if (q2.type === "tf") q2.options = ["True", "False"];
+      if (q2.type === "mcq" && (!q2.options || q2.options.length < 2)) return;
+      if (q2.type === "multi" && (!q2.options || q2.options.length < 2)) return;
+      if (q2.type === "mcq" || q2.type === "tf") {
+        q2.answer = normAnswer(q, q2.type, q2.options || ["True", "False"]);
+      } else if (q2.type === "multi") {
+        let answers = q.answers ?? q.answer;
+        if (answers == null) answers = [];
+        if (!Array.isArray(answers)) answers = [answers];
+        q2.answers = answers.map(a => {
+          const n = typeof a === "number" ? a : parseInt(String(a), 10);
+          return (isNaN(n) && q2.options) ? q2.options.findIndex(o => norm(o) === norm(a)) : n;
+        }).filter(n => n >= 0 && n < (q2.options || []).length);
+        if (!q2.answers.length) return;
+      } else {
+        const acc = [].concat(q.accept || q.accepts || []).map(String);
+        q2.answer = String(q.answer ?? q.answers ?? q.a ?? "").trim();
+        if (!q2.answer && !acc.length) return;
+        q2.accept = acc;
+      }
+      qs.push(q2);
+    });
+    if (qs.length < 1) return null;
+    return { title: d.title || d.topic || "Quiz", difficulty: d.difficulty || null, questions: qs };
+  }
+
   /* ============ QUIZ ============ */
-  function renderQuiz(d, ctx) {
+  function renderQuiz(raw, ctx) {
+    const d = normalizeQuiz(raw);
+    if (!d) return null;
     const wrap = el("div", "blk blk-quiz");
-    const qs = (d.questions || []).filter(q => q && q.q);
-    if (!qs.length) return null;
+    const qs = d.questions;
     const state = Object.assign({ screen: "start", i: 0, answers: {}, score: 0 },
       (ctx.state && ctx.state.quiz) || {});
     const save = () => ctx.save && ctx.save({ quiz: state });
@@ -51,20 +254,22 @@ window.Ace = window.Ace || {};
          <span class="blk-quiz-score">${Ace.ICON("check", 13)} ${state.score} correct</span>`);
       const qEl = el("div", "blk-quiz-q", mdInline(q.q));
 
-      const type = q.type || (q.options ? "mcq" : "short");
+      const type = q.type;
       const body = el("div", "blk-quiz-body");
       let chosen = isAnswered ? picked.choice : (type === "mcq" || type === "tf" ? -1 : type === "multi" ? [] : "");
-      let choices = type === "tf" ? ["True", "False"] : (q.options || []);
+      const choices = type === "tf" ? ["True", "False"] : (q.options || []);
 
       function submit() {
         let ok = false;
-        if (type === "mcq" || type === "tf") ok = chosen === (q.answer ?? (type === "tf" ? 0 : q.answer));
+        if (type === "mcq" || type === "tf") ok = chosen === q.answer;
         else if (type === "multi") {
           const want = (q.answers || []).slice().sort().join(",");
           ok = chosen.slice().sort().join(",") === want;
         } else {
-          const acc = [q.answer].concat(q.accept || []).map(norm);
-          ok = acc.includes(norm(chosen));
+          const acc = [q.answer].concat(q.accept || []).map(norm).filter(Boolean);
+          const mine = norm(chosen);
+          ok = acc.some(a => a === mine ||
+            (mine.length > 3 && a.length > 3 && (a.includes(mine) || mine.includes(a))));
         }
         state.answers[qi] = { choice: chosen, correct: ok, text: type === "short" ? chosen : null };
         if (ok) state.score++;
@@ -114,7 +319,7 @@ window.Ace = window.Ace || {};
           hintBtn.onclick = () => {
             const ex = foot.querySelector(".blk-hint");
             if (ex) ex.remove();
-            else foot.append(el("div", "blk-hint", "💡 " + mdInline(q.hint)));
+            else foot.append(el("div", "blk-hint", "<b>Hint:</b> " + mdInline(q.hint)));
           };
           foot.append(hintBtn);
         }
@@ -129,9 +334,12 @@ window.Ace = window.Ace || {};
         go.classList.add("disabled");
         foot.append(go);
       } else {
+        const ansText = type === "short" ? q.answer
+          : type === "multi" ? (q.answers || []).map(i => choices[i]).join(", ")
+          : choices[q.answer];
         const verdict = el("div", "blk-verdict " + (correct ? "ok" : "no"),
           correct ? `${Ace.ICON("check", 15)} Correct!` :
-          `${Ace.ICON("close", 15)} Not quite — answer: <b>${esc(type === "short" ? q.answer : type === "multi" ? (q.answers || []).map(i => choices[i]).join(", ") : choices[q.answer])}</b>`);
+          `${Ace.ICON("close", 15)} Not quite — answer: <b>${esc(ansText)}</b>`);
         foot.append(verdict);
         if (q.explain) foot.append(el("div", "blk-explain", "<b>Why:</b> " + mdInline(q.explain)));
         const next = btn(qi + 1 < qs.length ? "Next question" : "See results", "btn-primary", "chev");
@@ -148,7 +356,7 @@ window.Ace = window.Ace || {};
     function doneScreen() {
       wrap.innerHTML = "";
       const pct = Math.round((state.score / qs.length) * 100);
-      const grade = pct >= 90 ? "🏆 Outstanding" : pct >= 75 ? "🎯 Strong" : pct >= 50 ? "📈 Getting there" : "📚 Keep drilling";
+      const grade = pct >= 90 ? "Outstanding" : pct >= 75 ? "Strong" : pct >= 50 ? "Getting there" : "Keep drilling";
       const card = el("div", "blk-quiz-result",
         `<div class="blk-quiz-score-big">${state.score}<span>/${qs.length}</span></div>
          <div class="blk-quiz-grade">${grade}</div>
@@ -162,7 +370,7 @@ window.Ace = window.Ace || {};
       const foot = el("div", "blk-quiz-actions");
       const retry = btn("Retry", "btn-ghost", "refresh");
       retry.onclick = () => { state.screen = "start"; state.reshuffle = true; save(); draw(); };
-      const harder = btn("Make it harder 🔥", "btn-primary");
+      const harder = btn("Make it harder", "btn-primary");
       harder.onclick = () => wrap.dispatchEvent(new CustomEvent("ace:block-action",
         { bubbles: true, detail: { type: "quiz-harder", topic: d.title || "" } }));
       foot.append(retry, harder);
@@ -179,13 +387,14 @@ window.Ace = window.Ace || {};
   }
 
   /* ============ FLASHCARDS ============ */
-  function renderFlashcards(d, ctx) {
+  function renderFlashcards(raw, ctx) {
+    const d = Array.isArray(raw) ? { cards: raw } : raw;
     const cards = (d.cards || []).filter(c => c && (c.front || c.back));
     if (!cards.length) return null;
     const state = Object.assign({ i: 0, flipped: false, known: [] }, (ctx.state && ctx.state.cards) || {});
     const save = () => ctx.save && ctx.save({ cards: state });
     const wrap = el("div", "blk blk-fc");
-    const title = el("div", "blk-title", `🗂️ ${esc(d.title || "Flashcards")} <span class="blk-sub">${cards.length} cards</span>`);
+    const title = el("div", "blk-title", `${esc(d.title || "Flashcards")} <span class="blk-sub">${cards.length} cards</span>`);
 
     const stage = el("div", "blk-fc-stage");
     const cardEl = el("div", "blk-fc-card");
@@ -265,8 +474,7 @@ window.Ace = window.Ace || {};
     if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
     const grid = el("div", "blk-stat-grid");
     items.forEach(s => grid.append(el("div", "blk-stat",
-      `${s.icon ? `<div class="blk-stat-ic">${esc(s.icon)}</div>` : ""}
-       <div class="blk-stat-val">${esc(s.value)}</div>
+      `<div class="blk-stat-val">${esc(s.value)}</div>
        <div class="blk-stat-lbl">${esc(s.label)}</div>
        ${s.sub ? `<div class="blk-stat-sub">${esc(s.sub)}</div>` : ""}`)));
     wrap.append(grid);
@@ -345,8 +553,8 @@ window.Ace = window.Ace || {};
 
   /* ============ TABLE ============ */
   function renderTable(d) {
-    const cols = d.columns || [];
-    const rows = d.rows || [];
+    const cols = d.columns || d.headers || [];
+    const rows = (d.rows || []).filter(r => Array.isArray(r) ? r.length : r);
     if (!cols.length || !rows.length) return null;
     const wrap = el("div", "blk blk-table");
     if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
@@ -363,7 +571,7 @@ window.Ace = window.Ace || {};
     const tb = el("tbody");
     function drawRows(data) {
       tb.innerHTML = "";
-      data.forEach(r => tb.append(el("tr", cols.map((_, i) => `<td>${mdInline(r[i])}</td>`).join(""))));
+      data.forEach(r => tb.append(el("tr", cols.map((_, i) => `<td>${mdInline(Array.isArray(r) ? r[i] : (r[cols[i]] ?? ""))}</td>`).join(""))));
     }
     function sortRows(ci, th) {
       const cur = th.getAttribute("data-dir");
@@ -371,7 +579,7 @@ window.Ace = window.Ace || {};
       t.querySelectorAll("th").forEach(x => x.removeAttribute("data-dir"));
       th.setAttribute("data-dir", dir === 1 ? "asc" : "desc");
       drawRows(rows.slice().sort((a, b) => {
-        const x = String(a[ci] ?? ""), y = String(b[ci] ?? "");
+        const x = String(Array.isArray(a) ? a[ci] : a[cols[ci]] ?? ""), y = String(Array.isArray(b) ? b[ci] : b[cols[ci]] ?? "");
         const nx = parseFloat(x.replace(/[^0-9.\-]/g, "")), ny = parseFloat(y.replace(/[^0-9.\-]/g, ""));
         if (!isNaN(nx) && !isNaN(ny) && x.match(/\d/)) return (nx - ny) * dir;
         return x.localeCompare(y) * dir;
@@ -441,6 +649,7 @@ window.Ace = window.Ace || {};
     if (!d || typeof d !== "object") return null;
     if (Array.isArray(d)) {
       if (d.length && d[0] && ("front" in d[0] || "back" in d[0])) return "flashcards";
+      if (d.length && d[0] && ("q" in d[0] || "question" in d[0])) return "quiz";
       return null;
     }
     if (Array.isArray(d.questions)) return "quiz";
@@ -457,18 +666,20 @@ window.Ace = window.Ace || {};
   }
 
   Ace.Blocks = {
-    isBlock(lang) { return RENDERERS.hasOwnProperty(lang); },
+    isBlock(lang) { return RENDERERS.hasOwnProperty(String(lang || "").toLowerCase()); },
+    parse: parseLoose,
     render(lang, body, ctx) {
-      let data;
-      try { data = JSON.parse(body); } catch (e) { return renderCode(lang, body); }
-      const type = RENDERERS[lang] ? lang : inferType(data);
-      if (!type) return renderCode(lang, body);
+      const langN = String(lang || "").toLowerCase();
+      let data = parseLoose(body);
+      if (data === null || data === undefined) return renderCode(langN, body);
+      const type = RENDERERS[langN] ? langN : inferType(data);
+      if (!type) return renderCode(langN, body);
       try {
         const node = RENDERERS[type](data, ctx || {});
-        return node || renderCode(lang, body);
+        return node || renderCode(langN, body);
       } catch (e) {
         console.warn("block render failed", type, e);
-        return renderCode(lang, body);
+        return renderCode(langN, body);
       }
     },
     renderCode

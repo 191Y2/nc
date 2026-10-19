@@ -23,13 +23,16 @@ Ace.API_PATH_CHAT = "/chat/completions";
 
 /* Model registry — verified 2026-10 against the live API.
    free: works on a free Z.ai key (no balance needed).
-   fallback order matters: on error 1113 (no balance) we walk down. */
+   alwaysThinks: model rejects thinking:{type:"disabled"} (error 1210) —
+   the API client handles this automatically by dropping the param.
+   Default routing is FREE-FIRST: instant responses, no balance needed.
+   Premium models stay available in Settings for keys with balance. */
 Ace.MODELS = [
   { id: "glm-4.5-flash",  label: "GLM-4.5 Flash",  tag: "Free · Fast · Smart",  free: true,  vision: false },
   { id: "glm-4.6v-flash", label: "GLM-4.6V Flash", tag: "Free · Vision",        free: true,  vision: true  },
-  { id: "glm-5.3",        label: "GLM-5.3",        tag: "Flagship · needs balance", free: false, vision: false },
-  { id: "glm-5.3-flash",  label: "GLM-5.3 Flash",  tag: "Multimodal coding · needs balance", free: false, vision: true },
-  { id: "glm-5.2",        label: "GLM-5.2",        tag: "needs balance", free: false, vision: false },
+  { id: "glm-5.3",        label: "GLM-5.3",        tag: "Flagship · needs balance", free: false, vision: false, alwaysThinks: true },
+  { id: "glm-5.3-flash",  label: "GLM-5.3 Flash",  tag: "Multimodal coding · needs balance", free: false, vision: true, alwaysThinks: true },
+  { id: "glm-5.2",        label: "GLM-5.2",        tag: "needs balance", free: false, vision: false, alwaysThinks: true },
   { id: "glm-4.7",        label: "GLM-4.7",        tag: "needs balance", free: false, vision: false },
   { id: "glm-4.6",        label: "GLM-4.6",        tag: "needs balance", free: false, vision: false },
   { id: "glm-4.5",        label: "GLM-4.5",        tag: "needs balance", free: false, vision: false },
@@ -37,23 +40,31 @@ Ace.MODELS = [
 ];
 Ace.modelById = (id) => Ace.MODELS.find(m => m.id === id);
 
-/* Routing defaults — everything works on a free key out of the box. */
+/* Routing defaults — free-first so everything works out of the box.
+   "Think" uses the same free model with reasoning ENABLED (no balance
+   needed, no paid-model round-trip) instead of swapping models. */
 Ace.ROUTE = {
-  chat:  "glm-4.5-flash",   // everyday chat (free)
-  think: "glm-5.3",         // "Think" toggle → flagship, falls back to free flash
-  web:   "glm-4.5-flash",   // web search (free + search tool)
+  chat:  "glm-4.5-flash",   // everyday chat (free, thinking off = fast)
+  think: "glm-4.5-flash",   // "Think" toggle → same model, reasoning ON
+  web:   "glm-4.5-flash",   // web-grounded answers (free)
   vision:"glm-4.6v-flash",  // images (free vision)
-  work:  "glm-5.3",         // agentic builder → falls back to free flash
-  deep:  "glm-5.3",         // deep research synthesis → falls back
+  work:  "glm-4.5-flash",   // agentic builder (free, builds complete HTML apps)
+  deep:  "glm-4.5-flash",   // deep research synthesis (free)
   memory:"glm-4.5-flash",   // background memory extraction (free)
   title: "glm-4.5-flash"    // chat titles (free)
 };
 
-/* Free-tier fallback chains (used on error 1113 / 1211). */
+/* Fallback chains: if a premium model is picked in Settings and the key
+   lacks balance (1113) or the model is unknown (1211) / rejects thinking
+   controls (1210), we walk down to the free models. */
 Ace.FALLBACKS = {
-  text:   ["glm-5.3", "glm-4.7", "glm-4.6", "glm-4.5-flash"],
-  vision: ["glm-5.3-flash", "glm-4.6v-flash"],
-  work:   ["glm-5.3", "glm-5.2", "glm-4.7", "glm-4.6", "glm-4.5-flash"]
+  text:   ["glm-4.5-flash"],
+  vision: ["glm-4.6v-flash"],
+  work:   ["glm-4.5-flash"]
+};
+Ace.chainFor = (preferred, kind) => {
+  const fb = Ace.FALLBACKS[kind || "text"] || [];
+  return (preferred && !fb.includes(preferred)) ? [preferred].concat(fb) : fb.slice();
 };
 
 /* ---------- UI block types the renderer understands ---------- */
@@ -105,7 +116,12 @@ Ace.ICON = (name, size) => {
     warn: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
     img: "M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM21 15l-5-5L5 21",
     print: "M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z",
-    arrowUp: "M12 19V5M5 12l7-7 7 7"
+    arrowUp: "M12 19V5M5 12l7-7 7 7",
+    thumbUp: "M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3",
+    thumbDown: "M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zM17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3",
+    eye: "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z",
+    eyeOff: "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24M1 1l22 22",
+    clock: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
   };
   return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${P[name] || P.spark}"/></svg>`;
 };

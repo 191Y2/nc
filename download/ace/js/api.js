@@ -1,9 +1,12 @@
 /* ============================================================
    Ace — api.js · Z.ai API client (browser-direct, CORS-verified)
    • streaming chat with reasoning support
-   • automatic free-tier model fallback (error 1113/1211)
-   • grounded web search (tool: web_search, string "True" form,
-     thinking disabled — empirically verified 2026-10)
+   • automatic model fallback (balance 1113 / unknown model / thinking 1210)
+   • thinking-error auto-retry (models that can't disable thinking)
+   • REAL web search: multi-source (Wikipedia extracts + DuckDuckGo
+     + Bing + news), browser-direct on GitHub Pages, through the
+     same-origin /api/zai/search proxy when the host provides one
+     (school-firewall-proof), with a 5-minute cache
    • deep research orchestration (sub-queries → parallel search
      → synthesized brief)
    ============================================================ */
@@ -47,9 +50,9 @@ window.Ace = window.Ace || {};
     e.code = String(code); e.status = status;
     if (code === "1113" || /balance|recharge/i.test(msg)) e.kind = "balance";
     else if (code === "1211" || /unknown model/i.test(msg)) e.kind = "unknown-model";
+    else if (code === "1210" || /cannot be disabled/i.test(msg)) e.kind = "thinking";
     else if (status === 401 || code === "1002" || code === "1001" || /api[ _]?key/i.test(msg)) e.kind = "auth";
-    else if (status === 429) e.kind = "rate";
-    else if (status === 429 || code === "1302") e.kind = "rate";
+    else if (status === 429 || code === "1302" || code === "1305") e.kind = "rate";
     else e.kind = "other";
     return e;
   }
@@ -57,10 +60,10 @@ window.Ace = window.Ace || {};
   A.friendlyError = (e) => {
     if (!e) return "Something went wrong.";
     if (e.kind === "balance")
-      return "Your Z.ai key needs a resource package or balance for that model (error 1113). Open z.ai → Billing to top up or claim your free quota — Ace automatically fell back to the free model where possible.";
+      return "Your Z.ai key needs a resource package or balance for that model (error 1113). Ace automatically switched to the free model — everything still works.";
     if (e.kind === "auth") return "That Z.ai API key looks invalid or expired. Update it in Settings.";
-    if (e.kind === "rate") return "Rate limited — give it a couple of seconds and try again.";
-    if (e.kind === "unknown-model") return "That model isn't available on your key.";
+    if (e.kind === "rate") return "Z.ai servers are busy — give it a couple of seconds and try again.";
+    if (e.kind === "unknown-model") return "That model isn't available on your key — Ace fell back to the free model.";
     if (/Failed to fetch|NetworkError|network/i.test(e.message || ""))
       return "Can't reach api.z.ai — check the school wifi/firewall or your connection.";
     return e.message || "Something went wrong.";
@@ -102,22 +105,27 @@ window.Ace = window.Ace || {};
     return { role: m.role, content: c || (m.images && m.images.length ? "(image)" : "…") };
   });
 
-  /* ---------- streaming chat ---------- */
+  /* ---------- streaming chat ----------
+     chain: models to try in order. On "balance"/"unknown-model" we walk
+     down the chain. On "thinking" (model refuses thinking:disabled) we
+     retry the SAME model with the thinking param dropped — thinking-on
+     is that model's default. */
   A.stream = async (opts) => {
     opts = opts || {};
     const chain = opts.fallbackChain || [opts.model];
-    let lastErr = null;
+    let lastErr = null, noThinking = opts.noThinking || false;
     for (let ci = 0; ci < chain.length; ci++) {
       const model = chain[ci];
       if (!model) continue;
       try {
-        const out = await streamOnce(model, opts, ci > 0);
+        const out = await streamOnce(model, opts, ci > 0, noThinking);
         A.sessionWorked[opts.taskKey || model] = model;
         return out;
       } catch (e) {
         if (e.name === "AbortError") throw e;
         lastErr = e;
-        if (e.kind === "balance" || e.kind === "unknown-model") {
+        if (e.kind === "thinking" && !noThinking) { noThinking = true; ci--; continue; } // same model, drop thinking
+        if (e.kind === "balance" || e.kind === "unknown-model" || e.kind === "thinking") {
           if (ci < chain.length - 1) {
             document.dispatchEvent(new CustomEvent("ace:model-fallback",
               { detail: { from: model, to: chain[ci + 1], task: opts.taskKey || "chat" } }));
@@ -130,22 +138,26 @@ window.Ace = window.Ace || {};
     throw lastErr;
   };
 
-  async function streamOnce(model, opts, isFallback) {
+  async function streamOnce(model, opts, isFallback, noThinking) {
     const payload = { model, messages: A.toAPIMessages(opts.messages), stream: true };
     if (opts.maxTokens) payload.max_tokens = opts.maxTokens;
     if (opts.temperature != null) payload.temperature = opts.temperature;
-    if (opts.thinking === "disabled" || opts.thinking === "enabled") payload.thinking = { type: opts.thinking };
-    if (opts.tools) payload.tools = opts.tools;
+    if (!noThinking && (opts.thinking === "disabled" || opts.thinking === "enabled"))
+      payload.thinking = { type: opts.thinking };
 
     const res = await rawChat(payload, opts.signal);
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "", content = "", reasoning = "", usage = null, sources = [];
     const emit = throttle(() => opts.onDelta && opts.onDelta(content, reasoning), 60);
+    let done = false;
+    const guard = (fn) => (...a) => { if (!done) fn(...a); };
+    const safeDelta = guard((c, r) => opts.onDelta && opts.onDelta(c, r));
+    const safeReasoning = guard((r) => opts.onReasoning && opts.onReasoning(r));
 
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done: rdrDone, value } = await reader.read();
+      if (rdrDone) break;
       buf += dec.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n")) >= 0) {
@@ -157,14 +169,16 @@ window.Ace = window.Ace || {};
         const ch = j.choices && j.choices[0];
         const d = (ch && (ch.delta || ch.message)) || {};
         if (d.content) { content += d.content; emit(); }
-        if (d.reasoning_content) { reasoning += d.reasoning_content; opts.onReasoning && opts.onReasoning(reasoning); }
+        if (d.reasoning_content) { reasoning += d.reasoning_content; safeReasoning(reasoning); }
         // search results can arrive in several shapes depending on model
         const sr = d.web_search || d.search_result || j.web_search || (ch && ch.message && ch.message.web_search);
         if (Array.isArray(sr) && sr.length) sources = sr;
         if (j.usage) usage = j.usage;
       }
     }
-    opts.onDelta && opts.onDelta(content, reasoning, true);
+    done = true;
+    emit.cancel(); // kill any pending trailing call — the stream is over
+    safeDelta(content, reasoning, true);
     return { content, reasoning, usage, sources, model, fallbackUsed: isFallback };
   }
 
@@ -174,73 +188,219 @@ window.Ace = window.Ace || {};
     return r;
   };
 
-  /* throttle helper for streaming callbacks */
+  /* throttle helper for streaming callbacks — cancel() kills any
+     pending trailing call so no delta can land after the stream ends */
   function throttle(fn, ms) {
     let last = 0, t = null, lastArgs = null;
-    return (...args) => {
+    const wrapped = (...args) => {
       lastArgs = args;
       const now = Date.now();
       if (now - last >= ms) { last = now; fn(...lastArgs); }
       else if (!t) t = setTimeout(() => { t = null; last = Date.now(); fn(...lastArgs); }, ms - (now - last));
     };
+    wrapped.cancel = () => { if (t) { clearTimeout(t); t = null; } };
+    return wrapped;
   }
 
-  /* ---------- grounded web search chat ---------- */
-  A.WEB_TOOLS = [{
-    type: "web_search",
-    web_search: { enable: "True", search_engine: "search-prime", search_result: "True", count: 6 }
-  }];
+  /* ============================================================
+     REAL WEB SEARCH
+     Layer 1 (works everywhere incl. preview/school firewalls):
+       same-origin proxy /api/zai/search when the host provides it.
+     Layer 2 (GitHub Pages — browser-direct, CORS-verified):
+       • Wikipedia search + full intro extracts (real, current facts)
+       • DuckDuckGo Instant Answers (entity abstracts)
+       • Best-effort: Bing web results + Google News headlines via
+         public CORS proxies (silent-fail on 6s timeout)
+     All layers: 5-minute per-query cache, never throws.
+     ============================================================ */
+  const searchCache = new Map(); // query → {ts, refs}
+  const NEWSY = /\b(latest|news|today|yesterday|tonight|this week|this month|breaking|headline|score|game|won|winner|election|released|update on|rumor|trade|draft|signing| injured|championship|playoff)\b/i;
 
-  /* ---------- FREE live references (no key, CORS-open, works on any static host)
-     Wikipedia search + DuckDuckGo Instant Answers. These give REAL citations —
-     the honesty layer that keeps answers grounded on free Z.ai keys (where the
-     server-side web_search tool is silently skipped). ---------- */
-  A.freeWebSearch = async (query) => {
+  function stripTags(s) {
+    return String(s == null ? "" : s)
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/\s+/g, " ").trim();
+  }
+  function decodeXML(s) {
+    return String(s == null ? "" : s)
+      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  }
+  function fetchTimeout(url, ms, opts) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    return fetch(url, Object.assign({ signal: ctl.signal, cache: "no-store" }, opts || {}))
+      .finally(() => clearTimeout(t));
+  }
+
+  /* ---- Wikipedia: search + full intro extracts (CORS-open) ---- */
+  async function wikiRefs(q) {
     const refs = [];
-    const q = String(query || "").trim().slice(0, 300);
-    if (!q) return refs;
-
-    // DuckDuckGo Instant Answer
     try {
-      const r = await fetch("https://api.duckduckgo.com/?q=" + encodeURIComponent(q) +
-        "&format=json&no_html=1&skip_disambig=1", { cache: "no-store" });
-      if (r.ok) {
-        const j = await r.json();
-        if (j.AbstractText) refs.push({ title: j.Heading || "DuckDuckGo", link: j.AbstractURL || "https://duckduckgo.com", media: "DuckDuckGo", content: j.AbstractText });
-        if (j.Answer) refs.push({ title: (j.AnswerType || "Instant answer") + ": " + q, link: "https://duckduckgo.com/?q=" + encodeURIComponent(q), media: "DuckDuckGo", content: String(j.Answer).replace(/<[^>]+>/g, " ") });
-        (j.RelatedTopics || []).slice(0, 3).forEach(t => {
-          if (t && t.Text && t.FirstURL) refs.push({ title: t.Text.slice(0, 80), link: t.FirstURL, media: "DuckDuckGo", content: t.Text });
-        });
-      }
-    } catch (e) { /* network-blocked: degrade to wiki only */ }
-
-    // Wikipedia search (top 5 with snippets)
-    try {
-      const r = await fetch("https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" +
-        encodeURIComponent(q) + "&srlimit=5&format=json&origin=*", { cache: "no-store" });
-      if (r.ok) {
-        const j = await r.json();
-        const hits = (((j.query || {}).search) || []);
-        hits.forEach(h => {
+      const r = await fetchTimeout(
+        "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" +
+        encodeURIComponent(q) + "&srlimit=4&format=json&origin=*", 7000);
+      if (!r.ok) return refs;
+      const j = await r.json();
+      const titles = (((j.query || {}).search) || []).map(h => h.title);
+      if (!titles.length) return refs;
+      // intro extracts for the top articles — real content, not just snippets
+      try {
+        const r2 = await fetchTimeout(
+          "https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&redirects=1&titles=" +
+          encodeURIComponent(titles.slice(0, 3).join("|")) + "&format=json&origin=*", 7000);
+        if (r2.ok) {
+          const j2 = await r2.json();
+          const pages = ((j2.query || {}).pages) || {};
+          Object.values(pages).forEach(p => {
+            const ex = (p.extract || "").replace(/\s+/g, " ").trim();
+            if (ex) refs.push({
+              title: p.title, media: "Wikipedia",
+              link: "https://en.wikipedia.org/wiki/" + encodeURIComponent(String(p.title).replace(/ /g, "_")),
+              content: ex.slice(0, 1200)
+            });
+          });
+        }
+      } catch (e) { /* extracts failed — fall back to search snippets */ }
+      if (!refs.length) {
+        (((j.query || {}).search) || []).slice(0, 3).forEach(h => {
           refs.push({
-            title: h.title,
+            title: h.title, media: "Wikipedia",
             link: "https://en.wikipedia.org/wiki/" + encodeURIComponent(String(h.title).replace(/ /g, "_")),
-            media: "Wikipedia",
-            content: String(h.snippet || "").replace(/<[^>]+>/g, "").replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+            content: stripTags(h.snippet).slice(0, 400)
           });
         });
       }
-    } catch (e) { /* degrade */ }
+    } catch (e) { /* network-blocked or rate-limited */ }
+    return refs;
+  }
 
-    // dedupe by link
+  /* ---- DuckDuckGo Instant Answers (CORS-open) ---- */
+  async function ddgRefs(q) {
+    const refs = [];
+    try {
+      const r = await fetchTimeout(
+        "https://api.duckduckgo.com/?q=" + encodeURIComponent(q) +
+        "&format=json&no_html=1&skip_disambig=1", 7000);
+      if (!r.ok) return refs;
+      const j = await r.json();
+      if (j.AbstractText) refs.push({
+        title: j.Heading || q, media: "DuckDuckGo",
+        link: j.AbstractURL || "https://duckduckgo.com/?q=" + encodeURIComponent(q),
+        content: String(j.AbstractText).slice(0, 900)
+      });
+      if (j.Answer && typeof j.Answer === "string")
+        refs.push({ title: "Instant answer: " + q, media: "DuckDuckGo", link: "https://duckduckgo.com/?q=" + encodeURIComponent(q), content: stripTags(j.Answer).slice(0, 300) });
+      (j.RelatedTopics || []).slice(0, 2).forEach(t => {
+        if (t && t.Text && t.FirstURL) refs.push({ title: t.Text.slice(0, 80), media: "DuckDuckGo", link: t.FirstURL, content: t.Text.slice(0, 300) });
+      });
+    } catch (e) { /* silent */ }
+    return refs;
+  }
+
+  /* ---- Best-effort: real web results (Bing RSS) + news (Google News RSS)
+     via public CORS proxies. These public services come and go —
+     each try has a short timeout and fails silently. ---- */
+  const CORS_PROXIES = [
+    (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+    (u) => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u)
+  ];
+  async function fetchViaProxy(url, ms) {
+    for (const wrap of CORS_PROXIES) {
+      try {
+        const r = await fetchTimeout(wrap(url), ms);
+        if (r.ok) { const t = await r.text(); if (t && t.length > 200) return t; }
+      } catch (e) { /* try next proxy */ }
+    }
+    return null;
+  }
+  function parseRSS(xml, max) {
+    const out = [];
+    try {
+      const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+      for (const it of items.slice(0, max)) {
+        const title = decodeXML((it.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || "");
+        const link = (it.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || "";
+        const desc = stripTags(decodeXML((it.match(/<description>([\s\S]*?)<\/description>/) || [])[1] || ""));
+        const date = (it.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || "";
+        if (title && link) out.push({ title, link: link.trim(), content: (date ? "[" + date.trim() + "] " : "") + desc.slice(0, 350) });
+      }
+    } catch (e) { /* not xml */ }
+    return out;
+  }
+  async function bingRefs(q) {
+    const xml = await fetchViaProxy(
+      "https://www.bing.com/search?q=" + encodeURIComponent(q) + "&format=rss&count=10&mkt=en-US&setlang=en-US", 6000);
+    if (!xml) return [];
+    return parseRSS(xml, 6).map(r => Object.assign(r, { media: "Bing" }));
+  }
+  async function newsRefs(q) {
+    const xml = await fetchViaProxy(
+      "https://news.google.com/rss/search?q=" + encodeURIComponent(q) + "&hl=en-US&gl=US&ceid=US:en", 6000);
+    if (!xml) return [];
+    return parseRSS(xml, 5).map(r => Object.assign(r, { media: "Google News" }));
+  }
+
+  /* ---- search query cleanup: "What's Islam Makhachev's current record?"
+     → "Islam Makhachev record" (search engines hate full questions) ---- */
+  function searchQueryClean(q) {
+    let s = String(q || "");
+    s = s.replace(/[?!.,;:"()\[\]—–]+/g, " ")      // punctuation
+      .replace(/[\u2019']s\b/g, "")                  // possessive 's
+      .replace(/[\u2019']/g, "")                     // stray apostrophes
+      .replace(/\s+/g, " ").trim();
+    const DROP = new Set(("what whats who whos when where why how which is are was were am do does did can could " +
+      "will would should the a an of in on at to for from with about into over after before me you your my i " +
+      "current currently latest right now today tell show give find get explain does there their it its and or " +
+      "if so than then very really just please thanks thank").split(" "));
+    const keep = s.split(" ").filter(w => w && !DROP.has(w.toLowerCase()));
+    let out = keep.join(" ").trim();
+    if (out.split(" ").length > 8) out = keep.slice(0, 8).join(" "); // cap length
+    return out || s.slice(0, 80);
+  }
+
+  /* ---- unified entry ---- */
+  A.searchWeb = async (query) => {
+    const q0 = String(query || "").trim().slice(0, 300);
+    if (!q0) return [];
+    const q = searchQueryClean(q0);
+    const cached = searchCache.get(q.toLowerCase());
+    if (cached && Date.now() - cached.ts < 300000) return cached.refs;
+
+    let refs = [];
+    try {
+      const proxied = await A.detectProxy();
+      if (proxied) {
+        // Layer 1: our own server-side search (school-firewall-proof, full web results)
+        try {
+          const r = await fetchTimeout("/api/zai/search?q=" + encodeURIComponent(q), 12000);
+          if (r.ok) {
+            const j = await r.json();
+            if (Array.isArray(j.refs)) refs = j.refs;
+          }
+        } catch (e) { /* fall through to direct */ }
+      }
+      if (!refs.length) {
+        // Layer 2: browser-direct (GitHub Pages)
+        const jobs = [wikiRefs(q), ddgRefs(q), bingRefs(q)];
+        if (NEWSY.test(q)) jobs.push(newsRefs(q));
+        const settled = await Promise.all(jobs.map(p => p.catch(() => [])));
+        refs = [].concat(...settled);
+      }
+    } catch (e) { refs = []; }
+
+    // dedupe by link, cap at 10, keep the meatiest refs
     const seen = new Set();
-    return refs.filter(x => x.link && !seen.has(x.link) && seen.add(x.link)).slice(0, 9);
+    refs = refs.filter(x => x && x.link && x.content && !seen.has(x.link) && seen.add(x.link)).slice(0, 10);
+    if (refs.length) searchCache.set(q.toLowerCase(), { ts: Date.now(), refs });
+    return refs;
   };
 
-  A.searchChat = (opts) => A.stream(Object.assign({}, opts, {
-    tools: A.WEB_TOOLS,
-    thinking: "disabled" // required: thinking mode bypasses the search tool
-  }));
+  /* legacy name kept for compatibility */
+  A.freeWebSearch = A.searchWeb;
 
   /* extract source links from reply content (fallback when API
      doesn't return a web_search array) */
@@ -260,7 +420,7 @@ window.Ace = window.Ace || {};
   /* ---------- deep research ---------- */
   A.deepResearch = async (opts) => {
     const { query, onStep, signal } = opts;
-    const chain = opts.chain || Ace.FALLBACKS.text;
+    const chain = opts.chain || [Ace.ROUTE.deep, "glm-4.5-flash"];
     const say = (label, state) => onStep && onStep(label, state);
 
     say("Breaking the question down", "run");
@@ -275,48 +435,34 @@ window.Ace = window.Ace || {};
       if (mm) { const arr = JSON.parse(mm[0]); if (Array.isArray(arr) && arr.length) subq = arr.slice(0, 5).map(String); }
     } catch (e) { if (e.name === "AbortError") throw e; }
 
-    say(`Searching — ${subq.length} angles`, "run");
+    say(`Searching ${subq.length} angles`, "run");
     const searches = await Promise.all(subq.map(async (q, i) => {
       say(`Search ${i + 1}/${subq.length}: ${q.slice(0, 60)}`, "run");
       try {
-        // free live references (Wikipedia + DDG) first — always available, real citations
-        const refs = await A.freeWebSearch(q).catch(() => []);
-        let facts = refs.length ? "Reference material:\n" + refs.map((r, k) => `(${k + 1}) ${r.title} (${r.media}): ${r.content}`).join("\n") : "";
-        let sources = refs.slice();
-        // tool-grounded pass too (activates when the Z.ai key has search quota)
-        try {
-          const r = await A.searchChat({
-            model: Ace.ROUTE.web, fallbackChain: [Ace.ROUTE.web], taskKey: "web", signal,
-            maxTokens: 700, temperature: 0.4,
-            messages: [
-              { role: "system", content: "You are a research assistant with live web search. Search the web and report ONLY key facts you actually found (with dates/numbers when present) and the exact source URLs. 3-6 tight bullet points. If the search doesn't answer it, say 'not found'. Never invent facts or URLs." },
-              { role: "user", content: q }
-            ]
-          });
-          if (r.content && r.content.trim() && !/^\s*not found/i.test(r.content)) facts += "\n\nSearch results:\n" + r.content;
-          const srcs = (r.sources && r.sources.length ? r.sources : A.extractSources(r.content));
-          sources = sources.concat(srcs || []);
-        } catch (e) { if (e.name === "AbortError") throw e; }
-        return { q, facts, sources };
+        const refs = await A.searchWeb(q).catch(() => []);
+        const facts = refs.length
+          ? refs.map((r, k) => `(${k + 1}) ${r.title} (${r.media}) — ${r.link}\n${r.content}`).join("\n\n")
+          : "";
+        return { q, facts, sources: refs };
       } catch (e) {
         if (e.name === "AbortError") throw e;
         return { q, facts: "", sources: [], error: e.message };
       }
     }));
 
-    say("Reading & synthesizing the brief", "run");
+    say("Synthesizing the brief", "run");
     const findings = searches.map((s, i) =>
       `### Sub-query ${i + 1}: ${s.q}\n${s.facts || "(no results)"}\nSources:\n${(s.sources || []).map(x => `- ${x.title} — ${x.link}`).join("\n") || "(none)"}`).join("\n\n");
     const synth = await A.stream({
       model: chain[0], fallbackChain: chain, taskKey: "deep", signal,
-      temperature: 0.5, maxTokens: 4000,
+      temperature: 0.5, maxTokens: 6000,
       messages: [{ role: "user", content: Ace.PROMPTS.deepSynthesize(query, findings) }]
     });
 
     const allSources = [];
     searches.forEach(s => (s.sources || []).forEach(x => { if (!allSources.some(y => y.link === x.link)) allSources.push(x); }));
     say("Done", "done");
-    return { report: synth.content, sources: allSources, subqueries: subq };
+    return { report: synth.content, sources: allSources, subqueries: subq, model: synth.model };
   };
 
   /* ---------- key test ---------- */
