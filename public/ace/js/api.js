@@ -362,6 +362,18 @@ window.Ace = window.Ace || {};
     return out || s.slice(0, 80);
   }
 
+  /* ---- relevance validation: engines sometimes return junk that has
+     nothing to do with the query. A ref must mention a fair share of the
+     query keywords or it never reaches the model. ---- */
+  function isRelevant(ref, query, minRatio) {
+    const terms = String(query || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2);
+    if (!terms.length) return true;
+    const hay = ((ref && (ref.title + " " + ref.content)) || "").toLowerCase();
+    let hits = 0;
+    terms.forEach(t => { if (hay.includes(t)) hits++; });
+    return hits >= Math.max(1, Math.ceil(terms.length * (minRatio || 0.34)));
+  }
+
   /* ---- unified entry ---- */
   A.searchWeb = async (query) => {
     const q0 = String(query || "").trim().slice(0, 300);
@@ -385,18 +397,20 @@ window.Ace = window.Ace || {};
       }
       if (!refs.length) {
         // Layer 2: browser-direct (GitHub Pages)
-        const jobs = [wikiRefs(q), ddgRefs(q), bingRefs(q)];
-        if (NEWSY.test(q)) jobs.push(newsRefs(q));
+        const jobs = [wikiRefs(q), ddgRefs(q), bingRefs(q), newsRefs(q)];
         const settled = await Promise.all(jobs.map(p => p.catch(() => [])));
         refs = [].concat(...settled);
       }
     } catch (e) { refs = []; }
 
-    // dedupe by link, cap at 10, keep the meatiest refs
+    // dedupe by link → relevance-filter (junk never reaches the model) → cap
     const seen = new Set();
-    refs = refs.filter(x => x && x.link && x.content && !seen.has(x.link) && seen.add(x.link)).slice(0, 10);
-    if (refs.length) searchCache.set(q.toLowerCase(), { ts: Date.now(), refs });
-    return refs;
+    refs = refs.filter(x => x && x.link && x.content && !seen.has(x.link) && seen.add(x.link));
+    let good = refs.filter(x => isRelevant(x, q));
+    if (good.length < 2) good = refs.filter(x => isRelevant(x, q, 0.25)); // loosen before giving up
+    good = good.slice(0, 10);
+    if (good.length) searchCache.set(q.toLowerCase(), { ts: Date.now(), refs: good });
+    return good;
   };
 
   /* legacy name kept for compatibility */

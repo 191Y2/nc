@@ -23,9 +23,11 @@ window.Ace = window.Ace || {};
      JSON REPAIR PIPELINE
      Pass 1: strict JSON.parse
      Pass 2: structural regex repairs (trailing commas, missing
-             colons after keys, smart quotes, unquoted keys…)
+             colons after keys, smart quotes, full-width Chinese
+             punctuation, unquoted keys, key-leak inside arrays…)
      Pass 3: surgical salvage — extract top-level arrays/values and
              parse them individually, dropping only the broken items
+     Pass 4: bracket balancing + final attempts
      ============================================================ */
   function parseLoose(body) {
     const s = String(body == null ? "" : body).trim();
@@ -33,25 +35,86 @@ window.Ace = window.Ace || {};
     // strip a stray markdown fence or prose around the JSON
     // 1. strict
     try { return JSON.parse(s); } catch (e) { /* continue */ }
-    // 2. structural repairs
+    // 2. structural repairs — run the chain in both orders (comma-first
+    //    vs colon-first) because `"a" "b"` is ambiguous: missing comma
+    //    inside an array OR missing colon after an object key.
+    const variants = [repairChain(s, true), repairChain(s, false)];
+    for (const t of variants) {
+      try { return JSON.parse(t); } catch (e) { /* continue */ }
+      try { return JSON.parse(t.replace(/,\s*([}\]])/g, "$1")); } catch (e) { /* continue */ }
+      try { return JSON.parse(balanceBrackets(t)); } catch (e) { /* continue */ }
+    }
+    // 3. surgical salvage: pull out the biggest {...} or [...] and repair its items
+    const salved = salvage(s);
+    if (salved !== null) return salved;
+    for (const t of variants) {
+      try { return JSON.parse(balanceBrackets(salvageFix(t))); } catch (e) { /* continue */ }
+    }
+    return null;
+  }
+
+  function repairChain(s, colonFirst) {
     let t = s
       .replace(/^\s*```[a-z]*\s*/i, "").replace(/```\s*$/, "")
       .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
       .replace(/[\u2018\u2019]/g, "'")
+      // full-width Chinese punctuation → ASCII (models writing zh flip these)
+      .replace(/\uFF1A/g, ":")   // ：
+      .replace(/\uFF0C(?=\s*["\[\{\d\-tfn])/g, ",") // ，(structural only)
+      .replace(/[\uFF08\uFF09]/g, "(", ")") // （)
+      .replace(/[\u3010\u3011]/g, "[", "]")  // 【】
+      .replace(/\u3001(?=\s*["\[\{\d])/g, ",") // 、
       .replace(/,\s*([}\]])/g, "$1")                    // trailing commas
       .replace(/}\s*{/g, "},{")                         // missing commas between objects
       .replace(/]\s*{/g, "],{").replace(/}\s*\[/g, "},[") // missing commas obj↔arr
       .replace(/]\s*\[/g, "],[")
-      .replace(/"\s*\n\s*"/g, '",\n"')                  // missing comma between string members
+      .replace(/"\s*\n\s*"/g, '",\n"');                 // missing comma between string members
+    const colonRule = (x) => x
+      .replace(/"([A-Za-z_\u4e00-\u9fff][A-Za-z0-9_\u4e00-\u9fff]*)"\s+(?=["\[\{\dtnf])/g, '"$1":');
+    const commaRule = (x) => x
+      .replace(/(?<!\\)"\s+(?="[A-Za-z_])/g, '", ');
+    if (colonFirst) { t = colonRule(t); t = commaRule(t); }
+    else { t = commaRule(t); t = colonRule(t); }
+    // key-leak inside a string array: "options":["A","B","type":"C"… → close the array before the key
+    t = t.replace(/(\[\s*"[^"\[\]{}]*(?:\s*,\s*"[^"\[\]{}]*)*)\s*,\s*("type"\s*:)/g, "$1],$2")
       .replace(/([}\]"0-9truefalsnul]+)\s*\n(\s*")/g, "$1,\n$2");
-    // missing colon after keys: "answer" 1  →  "answer": 1
-    t = t.replace(/"([A-Za-z_][A-Za-z0-9_]*)"\s+(?=["\[\{\dtnf])/g, '"$1":');
-    try { return JSON.parse(t); } catch (e) { /* continue */ }
-    try { return JSON.parse(t.replace(/,\s*([}\]])/g, "$1")); } catch (e) { /* continue */ }
-    // 3. surgical salvage: pull out the biggest {...} or [...] and repair its items
-    const salved = salvage(s);
-    if (salved !== null) return salved;
-    return null;
+    return t;
+  }
+
+  /* Balance mismatched brackets: drop stray closers, append missing ones. */
+  function balanceBrackets(t) {
+    const pairs = { "]": "[", "}": "{", ")": "(" };
+    const closeOf = { "[": "]", "{": "}", "(": ")" };
+    const stack = [];
+    let inStr = false, escc = false, out = "";
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (escc) { out += c; escc = false; continue; }
+      if (c === "\\" && inStr) { out += c; escc = true; continue; }
+      if (c === '"') { inStr = !inStr; out += c; continue; }
+      if (inStr) { out += c; continue; }
+      if (c === "[" || c === "{" || c === "(") { stack.push(c); out += c; continue; }
+      if (c === "]" || c === "}" || c === ")") {
+        if (stack.length && stack[stack.length - 1] === pairs[c]) { stack.pop(); out += c; }
+        else if (stack.length) { // mismatched but something is open → close the opener properly
+          const want = closeOf[stack[stack.length - 1]];
+          if (want === c) { stack.pop(); out += c; }
+          else { out += want + c; stack.pop(); } // e.g. "…]" where "{" was open
+        }
+        // stray closer with empty stack → drop it
+        continue;
+      }
+      out += c;
+    }
+    // close any still-open brackets (but never inside a string)
+    let tail = "";
+    while (stack.length) tail = closeOf[stack.pop()] + tail;
+    return out + (inStr ? '"' : "") + tail;
+  }
+  function salvageFix(t) {
+    // strip prose before the first { or [ and after the last } or ]
+    const i1 = t.search(/[{[]/), i2 = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+    return i1 >= 0 && i2 > i1 ? t.slice(i1, i2 + 1) : t;
   }
 
   function salvage(s) {
@@ -144,11 +207,53 @@ window.Ace = window.Ace || {};
   }
 
   /* ============================================================
-     QUIZ DATA NORMALIZATION
-     The model writes answers in many shapes: index (2), string index
-     ("2"), letter ("B"), full option text, tf as "true"/true, multi
-     answers as single number, odd type names… we coerce everything.
+     KEY ALIAS MAP — the model sometimes translates JSON keys to
+     Chinese (问题/难度/选项…) or uses near-synonyms. Map everything
+     to the canonical keys BEFORE normalization, recursively.
      ============================================================ */
+  const KEY_ALIASES = {
+    // quiz / generic
+    "问题": "questions", "题目": "questions", "试题": "questions", "问答": "questions",
+    "questions": "questions", "items": "items", "qs": "qs",
+    "标题": "title", "名称": "title", "主题": "title",
+    "难度": "difficulty", "等级": "difficulty",
+    "答案": "answer", "正确答案": "answer", "答案们": "answers",
+    "选项": "options", "选择": "options", "选项们": "options",
+    "解释": "explain", "解析": "explain", "说明": "explain", "原因": "explain",
+    "提示": "hint", "线索": "hint",
+    "类型": "type", "题型": "type",
+    "接受": "accept", "可接受": "accept",
+    "分数": "score", "得分": "score",
+    // flashcards
+    "卡片": "cards", "正面": "front", "背面": "back",
+    // scorecard
+    "评分": "rating", "最高分": "ratingMax", "满分": "ratingMax",
+    "标语": "headline", "头条": "headline",
+    "统计": "stats", "排名": "ranked", "笔记": "notes",
+    // stats / table / compare
+    "项目": "items", "数值": "value", "标签": "label", "副标题": "sub",
+    "列": "columns", "行": "rows", "表头": "columns", "列名": "columns",
+    "赢家": "winner", "获胜": "winner", "结论": "verdict",
+    // steps / timeline / terms / progress
+    "步骤": "steps", "事件": "events", "术语": "terms",
+    "任务": "tasks", "权重": "weight", "截止": "due", "期限": "due",
+    "时间": "when", "何时": "when", "什么": "what", "详情": "detail",
+    "定义": "def", "例子": "example", "示例": "example"
+  };
+  function mapKeysDeep(v, depth) {
+    if (depth > 6) return v;
+    if (Array.isArray(v)) return v.map(x => mapKeysDeep(x, depth + 1));
+    if (v && typeof v === "object") {
+      const out = {};
+      Object.keys(v).forEach(k => {
+        const nk = KEY_ALIASES[k] || k;
+        out[nk] = mapKeysDeep(v[k], depth + 1);
+      });
+      return out;
+    }
+    return v;
+  }
+
   function normType(t) {
     t = String(t || "").toLowerCase().replace(/[\s-]+/g, "_");
     if (/mcq|multiple_choice|choice|single|radio|mc$/.test(t)) return "mcq";
@@ -183,11 +288,13 @@ window.Ace = window.Ace || {};
     if (Array.isArray(d)) d = { questions: d };
     const qs = [];
     (d.questions || d.items || d.qs || []).forEach(q => {
-      if (!q || typeof q !== "object" || !(q.q || q.question || q.prompt)) return;
+      if (!q || typeof q !== "object") return;
+      const qText = q.q || q.question || q.prompt || (typeof q.questions === "string" ? q.questions : null) || q.text;
+      if (!qText) return;
       const q2 = {
-        q: String(q.q || q.question || q.prompt),
+        q: String(qText),
         options: Array.isArray(q.options) ? q.options.filter(o => o != null).map(String)
-          : (q.options != null ? [String(q.options)] : null),
+          : (q.options != null && typeof q.options === "string" ? [q.options] : null),
         explain: q.explain || q.explanation || q.why || null,
         hint: q.hint || null
       };
@@ -216,6 +323,87 @@ window.Ace = window.Ace || {};
     });
     if (qs.length < 1) return null;
     return { title: d.title || d.topic || "Quiz", difficulty: d.difficulty || null, questions: qs };
+  }
+
+  /* ============================================================
+     LAST-RESORT REGEX QUIZ EXTRACTION
+     When even the salvage pipeline fails (severely malformed JSON),
+     scan the raw text for question/options/answer patterns and
+     rebuild a quiz from whatever is recognizable. Better than a
+     raw code dump.
+     ============================================================ */
+  function scanStringArray(s, start) {
+    let i = start + 1;
+    const items = [];
+    const skipWs = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+    skipWs();
+    if (s[i] === "]") return { items, end: i + 1 };
+    while (i < s.length) {
+      skipWs();
+      if (s[i] === '"') {
+        let v = "", j = i + 1;
+        while (j < s.length) {
+          if (s[j] === "\\") { v += s[j] + (s[j + 1] || ""); j += 2; continue; }
+          if (s[j] === '"') break;
+          v += s[j]; j++;
+        }
+        items.push(v); i = j + 1;
+        skipWs();
+        if (s[i] === ",") { i++; continue; }
+        return { items, end: i + 1 }; // ] or key-leak — either way we're done
+      } else break;
+    }
+    return { items, end: i };
+  }
+
+  function regexQuizExtract(body) {
+    const s = String(body || "");
+    if (!/"(q|question|题)"\s*:\s*"/.test(s)) return null;
+    const marks = [];
+    const qre = /"(?:q|question|题)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+    let m;
+    while ((m = qre.exec(s))) marks.push({ text: m[1], at: m.index });
+    if (marks.length < 2) return null;
+    const questions = [];
+    marks.forEach((mk, i) => {
+      const seg = s.slice(mk.at, i + 1 < marks.length ? marks[i + 1].at : mk.length ? s.length : s.length);
+      const q = { q: mk.text, type: "short", answer: "", explain: "" };
+      // options
+      const oi = seg.search(/"(?:options|选项)"\s*:\s*\[/);
+      let optionsEnd = -1;
+      if (oi >= 0) {
+        const br = seg.indexOf("[", oi);
+        const scanned = scanStringArray(seg, br);
+        if (scanned.items.length >= 2) { q.options = scanned.items; q.type = "mcq"; optionsEnd = oi + scanned.end; }
+      }
+      const tail = optionsEnd > 0 ? seg.slice(optionsEnd) : seg;
+      // type
+      const tm = tail.match(/"(?:type|类型|题型)"\s*:\s*"([^"]*)"/);
+      if (tm) q.type = tm[1];
+      // answers
+      const am = tail.match(/"(?:answers)"\s*:\s*\[/);
+      if (am) {
+        const scanned = scanStringArray(tail, tail.indexOf("[", am.index));
+        q.answers = scanned.items.map(x => parseInt(x, 10)).filter(x => !isNaN(x));
+        if (q.answers.length && q.options) q.type = "multi";
+      } else {
+        const am2 = tail.match(/"(?:answer|答案|正确答案)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?\d+)|(true|false))/);
+        if (am2) q.answer = am2[1] != null ? am2[1] : (am2[2] != null ? parseInt(am2[2], 10) : am2[3] === "true");
+        else if (q.type === "mcq" && q.options) q.answer = 0;
+        if (typeof q.answer === "string" && /^(true|false)$/i.test(q.answer)) { q.answer = q.answer.toLowerCase() === "true"; }
+        if (typeof q.answer === "boolean" && q.options) { q.type = "tf"; q.options = ["True", "False"]; }
+      }
+      // explain / hint
+      const em = tail.match(/"(?:explain|explanation|解析|解释|说明)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (em) q.explain = em[1];
+      const hm = tail.match(/"(?:hint|提示)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (hm) q.hint = hm[1];
+      if (q.type === "short" && !q.answer) return; // no answer recoverable
+      questions.push(q);
+    });
+    if (questions.length < 2) return null;
+    const tt = s.match(/"(?:title|标题|主题)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    return { title: tt ? tt[1] : "Quiz", questions };
   }
 
   /* ============ QUIZ ============ */
@@ -365,7 +553,7 @@ window.Ace = window.Ace || {};
       qs.forEach((q, qi2) => {
         const a = state.answers[qi2];
         review.append(el("div", "blk-quiz-revrow " + (a && a.correct ? "ok" : "no"),
-          `<span>${a && a.correct ? "✓" : "✗"}</span><span>${mdInline(q.q)}</span>`));
+          `<span>${a && a.correct ? Ace.ICON("check", 12) : Ace.ICON("close", 12)}</span><span>${mdInline(q.q)}</span>`));
       });
       const foot = el("div", "blk-quiz-actions");
       const retry = btn("Retry", "btn-ghost", "refresh");
@@ -410,13 +598,13 @@ window.Ace = window.Ace || {};
       const count = el("div", "blk-fc-count", `Card ${state.i + 1} / ${cards.length} · ${state.known.length} known`);
       cardEl.onclick = () => { state.flipped = !state.flipped; save(); cardEl.classList.toggle("flipped", state.flipped); };
       const nav = el("div", "blk-quiz-actions");
-      const prev = btn("‹ Prev", "btn-ghost"); prev.onclick = () => { state.i = Math.max(0, state.i - 1); state.flipped = false; save(); draw(); };
-      const know = btn(state.known.includes(state.i) ? "✓ Known" : "Got it", "btn-ok");
+      const prev = btn("Prev", "btn-ghost"); prev.onclick = () => { state.i = Math.max(0, state.i - 1); state.flipped = false; save(); draw(); };
+      const know = btn(state.known.includes(state.i) ? "Known" : "Got it", state.known.includes(state.i) ? "btn-ok" : "btn-ghost", state.known.includes(state.i) ? "check" : null);
       know.onclick = () => {
         if (!state.known.includes(state.i)) state.known.push(state.i); else state.known = state.known.filter(x => x !== state.i);
         save(); draw();
       };
-      const next = btn("Next ›", "btn-primary"); next.onclick = () => { state.i = Math.min(cards.length - 1, state.i + 1); state.flipped = false; save(); draw(); };
+      const next = btn("Next", "btn-primary"); next.onclick = () => { state.i = Math.min(cards.length - 1, state.i + 1); state.flipped = false; save(); draw(); };
       const shuffle = btn("", "btn-icon", "refresh");
       shuffle.title = "Shuffle";
       shuffle.onclick = () => { cards.sort(() => Math.random() - .5); state.i = 0; state.flipped = false; save(); draw(); };
@@ -495,7 +683,7 @@ window.Ace = window.Ace || {};
       const tr = el("tr");
       tr.append(el("td", "blk-compare-lbl", esc(r.label)));
       r.values.forEach((v, i) => {
-        tr.append(el("td", r.winner === i ? "win" : "", `${mdInline(v)}${r.winner === i ? `<span class="win-b">✓</span>` : ""}`));
+        tr.append(el("td", r.winner === i ? "win" : "", `${mdInline(v)}${r.winner === i ? `<span class="win-b">${Ace.ICON("check", 11)}</span>` : ""}`));
       });
       tb.append(tr);
     });
@@ -563,7 +751,7 @@ window.Ace = window.Ace || {};
     const thead = el("thead");
     const hr = el("tr");
     cols.forEach((c, ci) => {
-      const th = el("th", "", esc(c) + (d.sortable === false ? "" : ` <span class="sort-ic">⇅</span>`));
+      const th = el("th", "", esc(c) + (d.sortable === false ? "" : ` <span class="sort-ic">${Ace.ICON("chevDown", 10)}</span>`));
       if (d.sortable !== false) th.onclick = () => sortRows(ci, th);
       hr.append(th);
     });
@@ -608,7 +796,7 @@ window.Ace = window.Ace || {};
       const row = el("div", "blk-prow" + (on ? " on" : ""),
         `<button class="blk-pcheck" aria-label="toggle">${on ? Ace.ICON("check", 13) : ""}</button>
          <span class="blk-plabel">${mdInline(t.label)}</span>
-         <span class="blk-pweight">${"●".repeat(Math.min(5, t.weight || 1))}</span>`);
+         <span class="blk-pweight">${Ace.ICON("check", 8).repeat(Math.min(5, t.weight || 1))}</span>`);
       row.querySelector(".blk-pcheck").onclick = () => {
         state.done = on ? state.done.filter(x => x !== i) : state.done.concat([i]);
         save();
@@ -671,7 +859,14 @@ window.Ace = window.Ace || {};
     render(lang, body, ctx) {
       const langN = String(lang || "").toLowerCase();
       let data = parseLoose(body);
-      if (data === null || data === undefined) return renderCode(langN, body);
+      if (data === null || data === undefined) {
+        // LAST RESORT for quiz-ish fences: regex extraction from broken JSON
+        if (langN === "quiz" || langN === "json" || langN === "") {
+          try { data = regexQuizExtract(body); } catch (e) { data = null; }
+        }
+        if (data === null || data === undefined) return renderCode(langN, body);
+      }
+      try { data = mapKeysDeep(data, 0); } catch (e) { /* keep raw */ }
       const type = RENDERERS[langN] ? langN : inferType(data);
       if (!type) return renderCode(langN, body);
       try {
@@ -679,6 +874,13 @@ window.Ace = window.Ace || {};
         return node || renderCode(langN, body);
       } catch (e) {
         console.warn("block render failed", type, e);
+        // final parachute: broken quiz payload → regex extraction
+        if (type === "quiz") {
+          try {
+            const rx = regexQuizExtract(body);
+            if (rx) return renderQuiz(rx, ctx || {}) || renderCode(langN, body);
+          } catch (e2) { /* fall through */ }
+        }
         return renderCode(langN, body);
       }
     },

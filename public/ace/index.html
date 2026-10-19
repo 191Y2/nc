@@ -63,7 +63,7 @@
         <button id="sbOpen" class="ibtn" title="Open sidebar" aria-label="Open sidebar"></button>
         <div class="mode-pill" role="tablist" aria-label="Mode">
           <button data-mode="chat" class="active" role="tab" aria-selected="true">Chat</button>
-          <button data-mode="work" role="tab" aria-selected="false">Work</button>
+          <button data-mode="work" role="tab" aria-selected="false">Agent</button>
         </div>
         <div class="top-actions">
           <button id="btnModelChip" class="chip" title="Model routing"></button>
@@ -86,7 +86,14 @@
         <div id="statusBar" class="statusbar hidden"></div>
         <div id="attachRow" class="attachrow hidden"></div>
         <div class="composer" id="composer">
-          <button id="btnAttach" class="cbtn" title="Attach image (or paste / drag & drop)" aria-label="Attach image"></button>
+          <div class="plus-wrap">
+            <button id="btnAttach" class="cbtn" title="Attach — images, files, zip" aria-label="Attach"></button>
+            <div id="plusMenu" class="plus-menu hidden">
+              <button id="pmImages" class="pm-item"></button>
+              <button id="pmFiles" class="pm-item"></button>
+              <button id="pmZip" class="pm-item"></button>
+            </div>
+          </div>
           <textarea id="input" rows="1" placeholder="Ask anything — homework, essays, quizzes, research" aria-label="Message Ace"></textarea>
           <div class="c-pills">
             <button id="btnThink" class="pill" title="Think longer on the next answers">Think</button>
@@ -102,10 +109,12 @@
   </div>
 
   <!-- Overlays -->
-  <div id="dropOverlay" class="dropoverlay">Drop images here</div>
+  <div id="dropOverlay" class="dropoverlay">Drop images or files here</div>
   <div id="modalRoot"></div>
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  <input type="file" id="docInput" multiple hidden>
+  <input type="file" id="zipInput" accept=".zip,application/zip,application/x-zip-compressed" hidden>
 
   <script src="js/config.js"></script>
   <script src="js/prompts.js"></script>
@@ -115,6 +124,7 @@
   <script src="js/api.js"></script>
   <script src="js/memory.js"></script>
   <script src="js/images.js"></script>
+  <script src="js/files.js"></script>
   <script src="js/chat.js"></script>
   <script src="js/work.js"></script>
   <script src="js/app.js"></script>

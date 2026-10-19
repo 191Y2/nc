@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "*   **No emoji characters** are present in the UI; the interface relies on clean icons and text for all buttons, headers, and chips.\n*   **No rendering glitches or layout issues** are visible; text is clearly legible, elements are well-spaced, and there is no overlapping content.\n*   **Styling is consistent and professional**: the quiz card features a clear hierarchy with a prominent \"Start quiz\" button, while timer and source chips are properly rounded, legible, and correctly aligned.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1792447202,
+  "id": "202610200559592d2bcfe88a6a473d",
+  "model": "glm-5v-turbo",
+  "object": "chat.completion",
+  "request_id": "202610200559592d2bcfe88a6a473d",
+  "usage": {
+    "completion_tokens": 105,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 954,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 1059
+  }
+}

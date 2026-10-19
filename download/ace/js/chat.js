@@ -216,6 +216,17 @@ window.Ace = window.Ace || {};
         });
         bubble.append(grid);
       }
+      if (m.files && m.files.length) {
+        const fr = Ace.el("div", "msg-files");
+        m.files.forEach(f => {
+          const kb = f.size < 1024 ? f.size + " B" : (f.size / 1024).toFixed(1) + " KB";
+          fr.append(Ace.el("div", "msg-file",
+            `<span class="fc-ic">${Ace.ICON(/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(f.name) ? "img" : "file", 13)}</span>
+             <span class="msg-file-name" title="${Ace.esc(f.name)}">${Ace.esc(f.name)}</span>
+             <span class="msg-file-size">${kb}</span>`));
+        });
+        bubble.append(fr);
+      }
       if (m.content) bubble.append(Ace.el("div", "msg-text", Ace.esc(m.content).replace(/\n/g, "<br>")));
       const tools = Ace.el("div", "msg-tools");
       const edit = Ace.el("button", "mact", Ace.ICON("edit", 14));
@@ -409,22 +420,23 @@ window.Ace = window.Ace || {};
     const input = $("input");
     const text = input.value.trim();
     const images = Ace.Images.pending.slice();
-    if (!text && !images.length) return;
+    const files = Ace.Files ? Ace.Files.take() : [];
+    if (!text && !images.length && !files.length) return;
     if (!Ace.API.hasKey()) { Ace.UI.openSettings(); return; }
 
     input.value = ""; Ace.App.resizeInput();
     Ace.Images.pending.length = 0; Ace.Images.renderChips();
 
     const mode = Ace.App.mode;
-    if (mode === "work") return Ace.Work.send(text, images); // work mode pipeline
+    if (mode === "work") return Ace.Work.send(text, images, files); // agent mode pipeline
 
     const chat = await ensureChat(mode);
-    const userMsg = { id: Ace.uid(), role: "user", content: text, images, createdAt: Date.now() };
+    const userMsg = { id: Ace.uid(), role: "user", content: text, images, files, createdAt: Date.now() };
     C.messages.push(userMsg);
     C.appendMessage(userMsg);
     await Ace.Store.addMessage(chat.id, userMsg);
     if (!chat.title) {
-      chat.title = text.slice(0, 40) || "Images";
+      chat.title = text.slice(0, 40) || (images.length ? "Images" : "Files");
       Ace.Store.updateChat(chat.id, { title: chat.title }).catch(() => {});
       Ace.Memory.genTitle(text || "image analysis", chat.id).then(t => {
         chat.title = t; C.renderSidebar();
@@ -471,6 +483,7 @@ window.Ace = window.Ace || {};
     const lastUser = [...C.messages].reverse().find(m => m.role === "user");
     const userText = (lastUser && lastUser.content) || "";
     const hasImages = !!(lastUser && lastUser.images && lastUser.images.length);
+    const hasFiles = !!(lastUser && lastUser.files && lastUser.files.length);
 
     try {
       // context assembly
@@ -478,8 +491,8 @@ window.Ace = window.Ace || {};
       const memories = await Ace.Memory.recall(userText).catch(() => []);
       const memHint = $("memHint"); if (memHint) memHint.textContent = memories.length ? `${memories.length} memories in context` : "";
 
-      const autoWeb = settings.autoWebSearch !== false && !hasImages && !Ace.App.toggles.web &&
-        /\b(latest|today|right now|currently|news|prices?)\b|\bwho won\b|\bweather\b|\b(up ?to ?date|update on)\b|\b(stock|election|released|coming out|game last night)\b|20(2[5-9]|3[0-9])/i.test(userText);
+      const autoWeb = settings.autoWebSearch !== false && !hasImages && !hasFiles && !Ace.App.toggles.web &&
+        /\b(latest|today|right now|current|currently|news|prices?|record|score|champion)\b|\bwho won\b|\bweather\b|\b(up ?to ?date|update on)\b|\b(stock|election|released|coming out|game last night)\b|20(2[5-9]|3[0-9])/i.test(userText);
       const useWeb = Ace.App.toggles.web || autoWeb;
       const useDeep = Ace.App.toggles.deep && !hasImages;
       if (autoWeb) Ace.UI.toast("Auto web search on — this looks like a current-events question", "info");
@@ -501,15 +514,23 @@ window.Ace = window.Ace || {};
         const sysPrompt = Ace.PROMPTS.chat({
           webSearch: useWeb, refs, memories, summary: chat.summary,
           quizHint: /quiz|test me|flash ?card|drill me|practice (test|questions?)|study for/i.test(userText),
-          imageCount: hasImages ? lastUser.images.length : 0
+          imageCount: hasImages ? lastUser.images.length : 0,
+          fileCount: hasFiles ? lastUser.files.length : 0
         });
         const history = C.messages.slice(-Ace.HISTORY_LIMIT)
-          .map(m => ({
-            role: m.role, content: m.content,
-            // images only survive on the LAST user message (vision routing);
-            // older image messages degrade to text so text models don't reject them
-            images: (m.role === "user" && m === lastUser) ? m.images : undefined
-          }));
+          .map(m => {
+            const isLastUser = m.role === "user" && m === lastUser;
+            let content = m.content;
+            // files ride along with the LAST user message (full contents for the AI to view)
+            if (isLastUser && m.files && m.files.length && Ace.Files)
+              content = (content || "") + Ace.Files.buildContextFrom(m.files);
+            return {
+              role: m.role, content,
+              // images only survive on the LAST user message (vision routing);
+              // older image messages degrade to text so text models don't reject them
+              images: (m.role === "user" && m === lastUser) ? m.images : undefined
+            };
+          });
         history.unshift({ role: "system", content: sysPrompt });
 
         /* routing: free-first. Think = reasoning ON (same free model).
@@ -620,7 +641,7 @@ window.Ace = window.Ace || {};
     C.messages = C.messages.slice(0, idx);
     const lastUser = [...C.messages].reverse().find(m => m.role === "user");
     if (C.activeChat && (C.activeChat.mode === "work") && lastUser && Ace.Work && !Ace.Work.running) {
-      await Ace.Work.run(C.activeChat, lastUser.content || "");
+      await Ace.Work.run(C.activeChat, lastUser.content || "", lastUser.files || []);
     } else {
       await runCompletion(C.activeChat);
     }
@@ -708,8 +729,14 @@ window.Ace = window.Ace || {};
     await loadChats();
     C.initScroll();
     const hash = location.hash.replace("#", "");
-    if (hash && C.chats.find(c => c.id === hash)) C.open(hash);
-    else C.showWelcome(true);
+    if (hash && C.chats.find(c => c.id === hash)) { C.open(hash); return; }
+    // no deep link → reopen the most recent chat of the current mode so a
+    // reload never loses the conversation (fallback: welcome screen)
+    const mode = (Ace.App && Ace.App.mode) || "chat";
+    const last = C.chats.filter(c => (c.mode || "chat") === mode)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+    if (last) { await C.open(last.id); return; }
+    C.showWelcome(true);
   };
 
   Ace.Chat = C;

@@ -51,12 +51,14 @@ window.Ace = window.Ace || {};
     renderChips();
     Ace.UI.resizeInput && Ace.UI.resizeInput();
   }
+  I.attach = attach;
 
   function renderChips() {
     const row = $("attachRow");
     if (!row) return;
-    row.innerHTML = "";
-    row.classList.toggle("hidden", I.pending.length === 0);
+    row.querySelectorAll(".imgchip").forEach(x => x.remove());
+    const fileCount = (Ace.Files && Ace.Files.count()) || 0;
+    row.classList.toggle("hidden", I.pending.length === 0 && fileCount === 0);
     I.pending.forEach((im, i) => {
       const chip = Ace.el("div", "imgchip",
         `<img src="${im.dataUrl}" alt="${Ace.esc(im.name)}"><button class="imgchip-x" title="Remove">${Ace.ICON("close", 12)}</button>`);
@@ -79,9 +81,9 @@ window.Ace = window.Ace || {};
   }
 
   function init() {
-    const input = $("fileInput"), btn = $("btnAttach");
+    const input = $("fileInput");
     if (input) input.onchange = () => { attach(input.files); input.value = ""; };
-    if (btn) btn.onclick = () => input && input.click();
+    // (+ button now opens the attach menu — see files.js; btnAttach is owned there)
 
     // Ctrl+V paste (works anywhere in the app when no modal is open)
     document.addEventListener("paste", (e) => {
@@ -91,7 +93,7 @@ window.Ace = window.Ace || {};
       if (imgs.length) { e.preventDefault(); attach(imgs); }
     });
 
-    // drag & drop overlay
+    // drag & drop overlay — images AND files (zips included)
     const ov = $("dropOverlay");
     let dragDepth = 0;
     window.addEventListener("dragenter", (e) => {
@@ -103,14 +105,19 @@ window.Ace = window.Ace || {};
       if (!dragDepth) ov && ov.classList.remove("show");
     });
     window.addEventListener("dragover", (e) => e.preventDefault());
-    window.addEventListener("drop", (e) => {
+    window.addEventListener("drop", async (e) => {
       e.preventDefault(); dragDepth = 0; ov && ov.classList.remove("show");
       if (document.querySelector(".modal.show")) return;
-      attach(e.dataTransfer.files);
+      const files = Array.from(e.dataTransfer.files || []);
+      const imgs = files.filter(f => /^image\//.test(f.type));
+      const zips = files.filter(f => /\.zip$/i.test(f.name) || /zip/.test(f.type));
+      const rest = files.filter(f => !/^image\//.test(f.type) && !zips.includes(f));
+      if (imgs.length) attach(imgs);
+      if (rest.length && Ace.Files) Ace.Files.attachFiles(rest);
+      for (const z of zips) { if (Ace.Files) await Ace.Files.attachZip(z); }
     });
   }
 
-  I.attach = attach;
   I.renderChips = renderChips;
   I.lightbox = lightbox;
   I.init = init;

@@ -114,8 +114,8 @@ window.Ace = window.Ace || {};
     const modelSec = section("Default models");
     modelSec.append(modelSelect("Chat (casual)", "chatModel", Ace.ROUTE.chat, m => !m.vision));
     modelSec.append(modelSelect("Think (deep answers)", "thinkModel", Ace.ROUTE.think));
-    modelSec.append(modelSelect("Work (app builder)", "workModel", Ace.ROUTE.work));
-    modelSec.append(note("Free models work with zero balance. Premium models auto-fall back to GLM-4.5 Flash if your key lacks balance (error 1113)."));
+    modelSec.append(modelSelect("Agent (app builder)", "workModel", Ace.ROUTE.work));
+    modelSec.append(note("Free models work with zero balance. Premium models auto-fall back to GLM-4.5 Flash if your key lacks balance (error 1113). You can also switch the Agent model from the top bar in Agent mode."));
     b.append(modelSec);
 
     // behavior
@@ -239,8 +239,43 @@ window.Ace = window.Ace || {};
     const h = modal("Memory", b);
   };
 
-  /* =============== MODEL INFO POPOVER =============== */
+  /* =============== MODEL INFO POPOVER / AGENT MODEL PICKER =============== */
+  function updateModelChip() {
+    const chip = $("btnModelChip");
+    if (!chip) return;
+    if (App.mode === "work") {
+      const m = Ace.modelById(Ace.ROUTE.work) || {};
+      chip.innerHTML = Ace.ICON("code", 14) + " " + (m.label || "GLM-4.5 Flash");
+      chip.title = "Agent builder model — click to change";
+    } else {
+      chip.innerHTML = Ace.ICON("spark", 14) + " Smart models";
+      chip.title = "Model routing";
+    }
+  }
+
+  function agentModelPicker() {
+    const b = Ace.el("div", "modelpick");
+    b.append(Ace.el("div", "modelpop-t", "Agent builder model <span class=\"muted\">· powers plan, code & self-review</span>"));
+    Ace.MODELS.forEach(m => {
+      const sel = m.id === Ace.ROUTE.work;
+      const row = Ace.el("button", "mp-row" + (sel ? " sel" : ""));
+      row.innerHTML = `<span class="mp-ic">${Ace.ICON(m.vision ? "img" : "code", 15)}</span>
+        <span class="mp-body"><span class="mp-name">${Ace.esc(m.label)}</span><span class="mp-tag">${Ace.esc(m.tag)}</span></span>
+        <span class="mp-radio">${sel ? Ace.ICON("check", 14) : ""}</span>`;
+      row.onclick = async () => {
+        Ace.ROUTE.work = m.id;
+        try { await Ace.Store.saveSettings({ workModel: m.id }); } catch (e) {}
+        h.close(); updateModelChip();
+        Ace.UI.toast(`${m.label} is now the Agent builder`, "ok");
+      };
+      b.append(row);
+    });
+    b.append(Ace.el("div", "modelpop-note", "Free models need zero Z.ai balance. Premium picks auto-fall back to GLM-4.5 Flash when your key lacks balance (error 1113)."));
+    const h = modal("Agent model", b);
+  }
+
   function modelPopover() {
+    if (App.mode === "work") return agentModelPicker();
     const b = Ace.el("div", "modelpop");
     const freeTag = (id) => { const m = Ace.modelById(id) || {}; return m.free ? "free" : "premium*"; };
     b.innerHTML = `
@@ -249,9 +284,9 @@ window.Ace = window.Ace || {};
       ${row("bulb", "Think toggle", "GLM-4.5 Flash · reasoning on", "free")}
       ${row("globe", "Web search", "GLM-4.5 Flash + live search", "free")}
       ${row("img", "Images", "GLM-4.6V Flash", "free")}
-      ${row("code", "Work builder", (Ace.modelById(Ace.ROUTE.work) || {}).label, freeTag(Ace.ROUTE.work))}
+      ${row("code", "Agent builder", (Ace.modelById(Ace.ROUTE.work) || {}).label, freeTag(Ace.ROUTE.work))}
       ${row("search", "Deep research", (Ace.modelById(Ace.ROUTE.deep) || {}).label, freeTag(Ace.ROUTE.deep))}
-      <div class="modelpop-note">Everything runs on free models by default — no Z.ai balance needed. * Premium picks in Settings auto-fall back to free Flash when your key lacks balance.</div>`;
+      <div class="modelpop-note">Everything runs on free models by default — no Z.ai balance needed. * Premium picks in Settings auto-fall back to free Flash when your key lacks balance. Switch to the Agent tab to pick the builder model directly.</div>`;
     function row(ic, task, model, tag) {
       return `<div class="modelpop-row"><span class="mp-ic">${Ace.ICON(ic, 15)}</span><span class="mp-task">${task}</span><span class="mp-model">${Ace.esc(model || "")}</span><span class="mp-tag ${tag === "free" ? "ok" : ""}">${tag}</span></div>`;
     }
@@ -286,11 +321,13 @@ window.Ace = window.Ace || {};
   /* =============== SHELL =============== */
   App.setMode = (mode) => {
     App.mode = mode;
+    try { localStorage.setItem("ace:v1:mode", mode); } catch (e) {}
     document.querySelectorAll(".mode-pill button").forEach(b =>
       b.classList.toggle("active", b.dataset.mode === mode));
     const input = $("input");
     input.placeholder = mode === "work" ? "Describe an app, game, or site to build…" : "Ask anything — homework, essays, quizzes, research";
     $("btnNewChat").querySelector("span").textContent = mode === "work" ? "New project" : "New chat";
+    updateModelChip();
     Ace.Chat.showWelcome(Ace.Chat.messages.length === 0 || !Ace.Chat.activeChat);
   };
 
@@ -349,8 +386,9 @@ window.Ace = window.Ace || {};
     set("btnModelChip", Ace.ICON("spark", 14) + "Smart models");
     set("btnExport", Ace.ICON("download", 17));
     set("btnPrint", Ace.ICON("print", 17));
-    set("btnAttach", Ace.ICON("paperclip", 19));
+    set("btnAttach", Ace.ICON("plus", 20));
     set("btnMic", Ace.ICON("mic", 18));
+    updateModelChip();
     App.setSending(false);
   }
 
@@ -374,7 +412,15 @@ window.Ace = window.Ace || {};
     $("btnWeb").onclick = () => App.setWeb(!App.toggles.web);
 
     document.querySelectorAll(".mode-pill button").forEach(b =>
-      b.onclick = () => { if (b.dataset.mode !== App.mode) { App.setMode(b.dataset.mode); Ace.Chat.newChat(); } });
+      b.onclick = async () => {
+        if (b.dataset.mode === App.mode) return;
+        App.setMode(b.dataset.mode);
+        // reopen the most recent chat of the new mode (projects stay visible)
+        const last = Ace.Chat.chats.filter(c => (c.mode || "chat") === b.dataset.mode)
+          .sort((a, b2) => (b2.updatedAt || 0) - (a.updatedAt || 0))[0];
+        if (last) await Ace.Chat.open(last.id);
+        else Ace.Chat.newChat();
+      });
 
     $("sbCollapse").onclick = () => document.body.classList.add("sb-closed");
     $("sbOpen").onclick = () => document.body.classList.remove("sb-closed");
@@ -426,8 +472,11 @@ window.Ace = window.Ace || {};
 
     bindEvents();
     Ace.Images.init();
+    Ace.Files && Ace.Files.init();
     initVoice();
-    App.setMode("chat");
+    let savedMode = "chat";
+    try { savedMode = localStorage.getItem("ace:v1:mode") === "work" ? "work" : "chat"; } catch (e) {}
+    App.setMode(savedMode);
     Ace.Chat.init();
     Ace.Memory.sweep().then(updateMemCount).catch(() => {});
     updateMemCount();

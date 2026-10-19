@@ -38,3 +38,26 @@ Work Log:
 Stage Summary:
 - All reported issues fixed: agentic mode works end-to-end on free models, web search is real (multi-engine, grounded, cited), stopwatch shows per-phase timings + Worked for total, UI is emoji-free, quizzes render despite malformed JSON, chat is fast (thinking off by default).
 - Key decisions: free-first routing (premium only by explicit Settings choice, auto-fallback on 1113/1211/1210); search = proxy (preview/school firewall) + browser-direct (GitHub Pages) with cache; review score gate to keep build times sane on the free model.
+
+---
+Task ID: 3
+Agent: main (Z.ai GLM)
+Task: Deep-fix round 2 per user bug report: responses in Chinese + quiz rendered as raw code block; add richer agent trace details; rename Work tab to Agent + add agent model selector; replace attach button with a + menu (Upload images / Attach files / Upload zip); build an in-browser zip extractor that sends each file for the AI to view; fix web search junk results; "fix everything".
+
+Work Log:
+- Root-caused the screenshot failure via VLM transcription: GLM-4.5-flash stochastically responded in CHINESE, translating even JSON keys (问题/难度) and emitting malformed JSON (key-leak inside options arrays) — normalizer found no "questions" key → quiz fell back to raw code block.
+- prompts.js: added absolute LANGUAGE rule (always English, never Chinese) + JSON KEYS rule (exact English keys, never translate) to every prompt (chat, planner, builder, reviewer, memory, title, deep research); quiz prompt now documents zero-based answer indexes + compact one-line questions; added ATTACHED FILES section.
+- blocks.js: 4-pass JSON repair — full-width Chinese punctuation (，：（）【】、), dual-order comma/colon ambiguity resolution, options key-leak closure, bracket balancing; Chinese→English key alias map applied recursively (问题→questions, 难度→difficulty, 选项→options + 40 more); regex quiz extractor as last resort (salvages questions from any wreckage); per-block Chinese key support; unit tests 15/15 incl. the exact screenshot payload.
+- NEW js/files.js: + menu (Upload images / Attach files / Upload zip); zero-dependency ZIP extractor built on native DecompressionStream (EOCD scan → central directory → local headers → inflate), filters __MACOSX/.DS_Store/oversized, routes text→AI-readable attachments, images→image attachments; caps per-file 60KB / total 240KB; zip extractor unit tests 10/10 (deflate + stored + nested paths + binary PNG + junk filtering).
+- chat.js: files ride on the user message (chips in bubble, contents injected into API context); autoWeb regex extended (current/record/score/champion); auto-restore most recent chat on reload.
+- work.js: renamed UX to Agent mode; richer trace (request banner, plan card w/ palette swatches + build order, live section detection "writing the CSS/JS logic", KB/s + elapsed, code stats, review scores + issues, ship details); files/zips injected into planner+builder prompts (agent extends uploaded projects); fixed duplicate-step bug in fix loops (one row per key).
+- app.js: Agent tab (ex-"Work"); mode-aware model chip — in Agent mode it's a model picker (all 9 models, persists to settings.workModel); mode persisted across reloads; switching tabs reopens that mode's most recent chat.
+- Web search junk fix: Bing RSS now returns random cached junk (Taco Bell for UFC queries — root cause of "searched but didn't work"); added keyword-relevance validation to BOTH the /api/zai/search proxy and browser-direct path (refs must mention ≥34% of query terms; junk dropped before the model sees it); Google News always in the pool; verified ESPN/Tapology/Sherdog sources with grounded 30-fights/29-wins/1-loss scorecard.
+- File-input fix: clearing input.value before async read invalidated File refs (NotReadableError) — now clear after.
+- Emoji sweep round 2: replaced ✓/✗/‹/›/⇅/● text symbols with SVG icons (quiz review rows, flashcard nav, compare winner, table sort, progress weights).
+- E2E verified in browser: UFC quiz request → English interactive quiz (4 questions, verdict/score/next all work, NO code block), stopwatch chips + Worked for totals; zip upload → 6 files extracted in-browser (5 text + 1 image) with toast; message with zip → AI lists and reads the files; Agent tab → model picker → tip calculator build (Reading → Plan 4 features → Build live code w/ section detection → review 6 issues → fix → ship 16KB 8/10, live preview + Open/Download/Code); reload → chat AND agent project auto-restore with artifacts; VLM visual QA clean (no emoji, no glitches).
+- Re-synced download/ace + ace.zip (93.5KB, 19 files), README updated (Agent mode, + menu, zip extractor, relevance-validated search).
+
+Stage Summary:
+- All reported issues fixed: English-only responses (language-locked prompts + Chinese-key-immune renderer), quizzes always render (4-pass repair + regex salvage), agent mode works with a detailed live trace + model selector + zip source material, + menu with working in-browser zip extraction, web search returns real relevant sources (junk filtered), everything persists across reloads.
+- Deliverables: /home/z/my-project/download/ace/ + ace.zip; live preview at the Next.js root page (/ace/index.html).

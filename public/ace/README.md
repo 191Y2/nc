@@ -2,7 +2,7 @@
 
 A single-folder, **100% static** AI chat + agentic app built for school work. Runs on **GitHub Pages** (github.io), works on school Chromebooks, no server, no build step, no Node.js.
 
-Powered by **GLM models from Z.ai** — with real memory, live web search that actually works, a per-answer **task stopwatch**, interactive quiz UI, rich answer cards (scorecards, comparisons, stats), photo homework solving, and a **Work mode** agent that plans → builds → reviews → ships real apps and games.
+Powered by **GLM models from Z.ai** — with real memory, live web search that actually works (junk-filtered, relevance-scored), a per-answer **task stopwatch**, interactive quiz UI, rich answer cards (scorecards, comparisons, stats), photo homework solving, a **+ attach menu** (images / files / **zip auto-extraction**), and an **Agent mode** builder that plans → builds → reviews → ships real apps and games.
 
 ---
 
@@ -11,13 +11,15 @@ Powered by **GLM models from Z.ai** — with real memory, live web search that a
 | Feature | How it works |
 |---|---|
 | **Real memory** | After conversations, a background pass extracts durable facts about you (grade, subjects, deadlines, goals). Memories are scored by importance × recency decay × relevance, reinforced when used, and injected into every chat — **across all chats, including old ones**. Manage everything in the Memory panel. |
-| **Web search that works** | The **Web** toggle runs a **real multi-engine search** (Bing web results + DuckDuckGo + Wikipedia full extracts + Google News for news queries), cleans your question into keyword form, caches for 5 minutes, shows a live **"Searching the web · 3.4s"** stopwatch, renders **real source chips**, and forces the AI to ground claims in what was actually found — if sources don't cover it, Ace says so instead of making things up. On GitHub Pages the search runs browser-direct (Wikipedia + DDG are CORS-open); on the preview it routes through the bundled same-origin `/api/zai/search` proxy so school firewalls can't kill it. |
-| **Task stopwatch** | Every answer shows what Ace did and how long each phase took: `Searching the web · 3.4s` → `Thinking · 2.1s` → `Writing · 6.3s` → `Creating quiz UI · 7.9s` → **`Worked for 12.5s`**. Work mode steps are timed too (`Planning the build · 1.3s`, `Building v1 · 58.9s` …). |
+| **Web search that works** | The **Web** toggle runs a **real multi-engine search** (Bing web results + DuckDuckGo + Wikipedia full extracts + Google News), cleans your question into keyword form, **validates every result for relevance** (junk results that have nothing to do with your question are dropped before the AI ever sees them), caches for 5 minutes, shows a live **"Searching the web · 3.4s"** stopwatch, renders **real source chips**, and forces the AI to ground claims in what was actually found — if sources don't cover it, Ace says so instead of making things up. On GitHub Pages the search runs browser-direct (Wikipedia + DDG are CORS-open); on the preview it routes through the bundled same-origin `/api/zai/search` proxy so school firewalls can't kill it. |
+| **Task stopwatch** | Every answer shows what Ace did and how long each phase took: `Searching the web · 3.4s` → `Thinking · 2.1s` → `Writing · 6.3s` → `Creating quiz UI · 7.9s` → **`Worked for 12.5s`**. Agent mode steps are timed too (`Planning the build · 1.3s`, `Building v1 · 58.9s` …). |
 | **Deep research** | The **Deep** toggle breaks your question into 3–5 sub-queries, searches them in parallel, and synthesizes a cited research brief with UI cards. |
-| **Quiz UI** | Ask to be quizzed and answers turn into **interactive quizzes** — multiple choice, multi-select, true/false, short answer — with instant feedback, explanations, scoring, retry, and a "make it harder" button. Multiple quizzes per message. A JSON-repair pipeline fixes the model's occasional malformed quiz JSON (missing colons/commas, string answers, odd types) instead of dumping raw code. |
+| **Quiz UI** | Ask to be quizzed and answers turn into **interactive quizzes** — multiple choice, multi-select, true/false, short answer — with instant feedback, explanations, scoring, retry, and a "make it harder" button. Multiple quizzes per message. A **4-pass JSON-repair pipeline** fixes the model's occasional malformed quiz JSON (missing colons/commas, string answers, odd types, full-width Chinese punctuation, even key collisions inside arrays) instead of dumping raw code — and if all repairs fail, a **regex extractor salvages every recognizable question** so a quiz still renders. |
 | **Answer cards** | Ratings and comparisons render as **scorecards** (9.7/10 style), **KPI stat grids**, **comparison tables** with winner checkmarks, **timelines**, **flashcards**, **step-by-step** guides, **vocab cards**, and **study plans** — plus normal Markdown (headings, lists, tables) for casual answers. |
 | **Photo homework** | Upload / **Ctrl+V paste** / drag & drop images (up to 4 per message). They route to the free **GLM-4.6V Flash** vision model. |
-| **Work mode (agentic builder)** | Toggle **Chat → Work**. Describe an app or game; the agent **plans → builds (single-file HTML, with live streaming code panel) → self-reviews → fixes real breakage → ships** with a sandboxed live preview, full-screen run, download button, and version iteration ("make X better" → v2). Runs on the free model — no balance needed. |
+| **+ attach menu** | The **+** button opens: **Upload images**, **Attach files** (text & code — .txt .md .js .py .html .csv … sent for the AI to view), and **Upload zip**. |
+| **Zip extractor** | Drop a `.zip` and Ace **extracts every file inside, entirely in your browser** (zero dependencies — built on the browser's native DecompressionStream). Text/code files become AI-readable attachments, images become image attachments, junk (`__MACOSX/`, `.DS_Store`) is skipped. Ask questions about the project, or upload it in **Agent mode** and the builder extends it. |
+| **Agent mode (agentic builder)** | Toggle **Chat → Agent**. Describe an app or game; the agent **reads your request → plans → builds (single-file HTML, with a live streaming code panel that shows what section it's writing and how fast) → self-reviews (score /10 + issues) → fixes real breakage → ships** with a sandboxed live preview, full-screen run, download button, and version iteration ("make X better" → v2). Zip uploads are treated as source material to build on. Runs on the free model — no balance needed — and you can **switch the builder model** from the top bar. |
 | **Think** toggle | Same fast free model with **reasoning enabled** — you see the thinking stream and a `Thinking · X.Xs` chip. |
 | **Voice input** | Mic button (Chrome, uses your browser's speech recognition). |
 | **Firebase sync** | Chats + memories sync to **your** Firebase (anonymous auth). If Firebase is unreachable, the app silently saves to this device instead — it never blocks you. |
@@ -92,13 +94,13 @@ This makes chats/memories sync across devices and shares your API key with anyon
 
 ---
 
-## 🎮 Using Work mode
+## 🎮 Using Agent mode
 
-1. Toggle **Work** at the top.
-2. Describe what you want: *"build a snake game with juice and high scores"*.
-3. Watch the agent trace: **Plan → Build (streaming) → Review (score /10 + issues) → Fix → Ship**.
+1. Toggle **Agent** at the top (the model chip becomes a **builder-model picker**).
+2. Describe what you want: *"build a snake game with juice and high scores"* — or upload a **zip of an existing project** to extend it.
+3. Watch the live agent trace: **Reading your request → Plan (features, steps, palette) → Building (live code stream, section detection, KB/s) → Self-review (score /10 + issues) → Fix → Shipped** — every step timed.
 4. Play it in the embedded preview, **Open app** full screen, or **Download** the single `.html` file (works offline).
-5. Ask for changes — *"add sound effects"* — it ships **v2** building on v1.
+5. Ask for changes — *"add sound effects"* — it ships **v2** building on v1. Your projects stay in the sidebar and reopen when you switch back to the Agent tab.
 
 ## 📁 Files
 
@@ -108,16 +110,17 @@ This makes chats/memories sync across devices and shares your API key with anyon
 ├── css/blocks.css    # AI UI component styles
 └── js/
     ├── config.js     # firebase config, models, icons, helpers
-    ├── prompts.js    # all system prompts (persona, UI protocol, agent, memory)
+    ├── prompts.js    # all system prompts (persona, UI protocol, agent, memory) — English-locked
     ├── markdown.js   # safe markdown renderer
-    ├── blocks.js     # quiz/scorecard/stats/compare/flashcards/steps/timeline/terms/table/progress
+    ├── blocks.js     # quiz/scorecard/stats/compare/flashcards/steps/timeline/terms/table/progress + JSON repair
     ├── storage.js    # Firestore + localStorage fallback adapter
-    ├── api.js        # Z.ai client: streaming, vision, web refs, deep research, fallbacks
+    ├── api.js        # Z.ai client: streaming, vision, relevance-validated web search, deep research, fallbacks
     ├── memory.js     # extraction, recall scoring, summaries, titles
     ├── images.js     # upload / paste / drag-drop / downscale
-    ├── chat.js       # chat engine, sidebar, send flow, sources, export
-    ├── work.js       # agentic builder pipeline
-    └── app.js        # boot, settings, memory manager, toggles, voice
+    ├── files.js      # + menu: file attachments + zero-dependency zip extractor
+    ├── chat.js       # chat engine, sidebar, send flow, stopwatch, sources, export
+    ├── work.js       # Agent mode: analyze → plan → build → review → fix → ship
+    └── app.js        # boot, settings, memory manager, toggles, agent model picker, voice
 ```
 
 **Made for getting school work done — and getting your friend into college.** ⚡

@@ -1,0 +1,688 @@
+     1→/* ============================================================
+     2→   Ace — blocks.js · AI UI component system
+     3→   The AI emits ```quiz / ```scorecard / etc. JSON fences; these
+     4→   render as polished interactive cards — the "AI UI" layer.
+     5→   Includes a battle-tested JSON repair pipeline (the model sometimes
+     6→   emits slightly broken JSON: missing colons/commas, string answers,
+     7→   odd types — we fix or salvage instead of dumping raw code).
+     8→   All user-facing strings are escaped. State is saved per message.
+     9→   ============================================================ */
+    10→"use strict";
+    11→window.Ace = window.Ace || {};
+    12→(function () {
+    13→  const esc = Ace.esc, el = Ace.el, mdInline = (s) => Ace.MD.inline(s || "");
+    14→  const norm = (s) => String(s == null ? "" : s).toLowerCase().trim()
+    15→    .replace(/[.,!?;:'"()]+/g, "").replace(/\s+/g, " ");
+    16→
+    17→  function btn(label, cls, icon) {
+    18→    const b = el("button", "btn " + (cls || ""), (icon ? Ace.ICON(icon, 14) : "") + label);
+    19→    return b;
+    20→  }
+    21→
+    22→  /* ============================================================
+    23→     JSON REPAIR PIPELINE
+    24→     Pass 1: strict JSON.parse
+    25→     Pass 2: structural regex repairs (trailing commas, missing
+    26→             colons after keys, smart quotes, unquoted keys…)
+    27→     Pass 3: surgical salvage — extract top-level arrays/values and
+    28→             parse them individually, dropping only the broken items
+    29→     ============================================================ */
+    30→  function parseLoose(body) {
+    31→    const s = String(body == null ? "" : body).trim();
+    32→    if (!s) return null;
+    33→    // strip a stray markdown fence or prose around the JSON
+    34→    // 1. strict
+    35→    try { return JSON.parse(s); } catch (e) { /* continue */ }
+    36→    // 2. structural repairs
+    37→    let t = s
+    38→      .replace(/^\s*```[a-z]*\s*/i, "").replace(/```\s*$/, "")
+    39→      .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
+    40→      .replace(/[\u2018\u2019]/g, "'")
+    41→      .replace(/,\s*([}\]])/g, "$1")                    // trailing commas
+    42→      .replace(/}\s*{/g, "},{")                         // missing commas between objects
+    43→      .replace(/]\s*{/g, "],{").replace(/}\s*\[/g, "},[") // missing commas obj↔arr
+    44→      .replace(/]\s*\[/g, "],[")
+    45→      .replace(/"\s*\n\s*"/g, '",\n"')                  // missing comma between string members
+    46→      .replace(/([}\]"0-9truefalsnul]+)\s*\n(\s*")/g, "$1,\n$2");
+    47→    // missing colon after keys: "answer" 1  →  "answer": 1
+    48→    t = t.replace(/"([A-Za-z_][A-Za-z0-9_]*)"\s+(?=["\[\{\dtnf])/g, '"$1":');
+    49→    try { return JSON.parse(t); } catch (e) { /* continue */ }
+    50→    try { return JSON.parse(t.replace(/,\s*([}\]])/g, "$1")); } catch (e) { /* continue */ }
+    51→    // 3. surgical salvage: pull out the biggest {...} or [...] and repair its items
+    52→    const salved = salvage(s);
+    53→    if (salved !== null) return salved;
+    54→    return null;
+    55→  }
+    56→
+    57→  function salvage(s) {
+    58→    // try the largest outer object first
+    59→    const outer = s.indexOf("{") >= 0 ? braceSlice(s, s.indexOf("{"), "{", "}") : null;
+    60→    if (outer) {
+    61→      const inner = outer.body.slice(1, -1); // without {}
+    62→      const repairedObj = repairObjectBody(inner);
+    63→      if (repairedObj) return repairedObj;
+    64→    }
+    65→    // try the largest array
+    66→    const arr = s.indexOf("[") >= 0 ? braceSlice(s, s.indexOf("["), "[", "]") : null;
+    67→    if (arr) {
+    68→      const items = splitTop(arr.body.slice(1, -1));
+    69→      const parsed = [];
+    70→      items.forEach(it => {
+    71→        const v = quickParse(it);
+    72→        if (v !== undefined) parsed.push(v);
+    73→      });
+    74→      if (parsed.length >= 2) return parsed;
+    75→    }
+    76→    return null;
+    77→  }
+    78→
+    79→  function braceSlice(s, start, open, close) {
+    80→    let depth = 0, inStr = false, escc = false;
+    81→    for (let i = start; i < s.length; i++) {
+    82→      const c = s[i];
+    83→      if (escc) { escc = false; continue; }
+    84→      if (c === "\\") { if (inStr) escc = true; continue; }
+    85→      if (c === '"') { inStr = !inStr; continue; }
+    86→      if (inStr) continue;
+    87→      if (c === open) depth++;
+    88→      else if (c === close) { depth--; if (depth === 0) return { body: s.slice(start, i + 1), end: i + 1 }; }
+    89→    }
+    90→    return null;
+    91→  }
+    92→
+    93→  function splitTop(s) {
+    94→    const out = []; let depth = 0, inStr = false, escc = false, cur = "";
+    95→    for (const c of s) {
+    96→      if (escc) { cur += c; escc = false; continue; }
+    97→      if (c === "\\" && inStr) { cur += c; escc = true; continue; }
+    98→      if (c === '"') { inStr = !inStr; cur += c; continue; }
+    99→      if (inStr) { cur += c; continue; }
+   100→      if (c === "{" || c === "[") depth++;
+   101→      if (c === "}" || c === "]") depth--;
+   102→      if (c === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+   103→      cur += c;
+   104→    }
+   105→    if (cur.trim()) out.push(cur);
+   106→    return out;
+   107→  }
+   108→
+   109→  function quickParse(item) {
+   110→    let t = item.trim().replace(/^,+|,+$/g, "").trim();
+   111→    if (!t) return undefined;
+   112→    for (const fix of [t, t.replace(/,\s*([}\]])/g, "$1"),
+   113→        t.replace(/"([A-Za-z_][A-Za-z0-9_]*)"\s+(?=["\[\{\dtnf])/g, '"$1":')]) {
+   114→      try { return JSON.parse(fix); } catch (e) { /* next */ }
+   115→    }
+   116→    return undefined;
+   117→  }
+   118→
+   119→  function repairObjectBody(inner) {
+   120→    const members = splitTop(inner);
+   121→    const obj = {};
+   122→    let ok = 0;
+   123→    members.forEach(m => {
+   124→      const v = quickParse(m);
+   125→      if (v !== undefined) { return; } // full member already fine (shouldn't happen at top level)
+   126→      const mm = m.match(/^"([^"]+)"\s*:\s*([\s\S]*)$/);
+   127→      if (mm) {
+   128→        let val = quickParse(mm[2]);
+   129→        if (val === undefined && /^\[[\s\S]*\]?\s*$/.test(mm[2].trim())) {
+   130→          // array with a broken item → salvage items individually, keep the good ones
+   131→          const innerArr = mm[2].trim().replace(/^\[/, "").replace(/\]\s*$/, "");
+   132→          const items = splitTop(innerArr).map(quickParse).filter(x => x !== undefined);
+   133→          if (items.length) val = items;
+   134→        }
+   135→        if (val === undefined && /^"[\s\S]*"?$/.test(mm[2].trim())) {
+   136→          const raw = mm[2].trim();
+   137→          const unq = raw.replace(/^"+/, "").replace(/"+$/, "");
+   138→          if (unq && !/[[\]{}\u0000-\u001f]/.test(unq.replace(/\\./g, ""))) { val = unq; } // salvage as string
+   139→        }
+   140→        if (val !== undefined) { obj[mm[1]] = val; ok++; }
+   141→      }
+   142→    });
+   143→    return ok ? obj : null;
+   144→  }
+   145→
+   146→  /* ============================================================
+   147→     QUIZ DATA NORMALIZATION
+   148→     The model writes answers in many shapes: index (2), string index
+   149→     ("2"), letter ("B"), full option text, tf as "true"/true, multi
+   150→     answers as single number, odd type names… we coerce everything.
+   151→     ============================================================ */
+   152→  function normType(t) {
+   153→    t = String(t || "").toLowerCase().replace(/[\s-]+/g, "_");
+   154→    if (/mcq|multiple_choice|choice|single|radio|mc$/.test(t)) return "mcq";
+   155→    if (/multi|select_all|checkbox|multiple_response/.test(t)) return "multi";
+   156→    if (/tf|true_false|boolean|bool/.test(t)) return "tf";
+   157→    if (/short|open|input|fill|text|free|written/.test(t)) return "short";
+   158→    return (t ? "mcq" : null);
+   159→  }
+   160→  function normAnswer(q, type, choices) {
+   161→    let a = q.answer ?? q.correct ?? q.ans ?? q.a;
+   162→    if (type === "tf") {
+   163→      if (typeof a === "boolean") return a ? 0 : 1;
+   164→      const s = String(a).toLowerCase().trim();
+   165→      return (s === "false" || s === "f" || s === "0" || s === "no") ? 1 : 0;
+   166→    }
+   167→    if (type === "mcq") {
+   168→      if (typeof a === "number" && a >= 0 && a < choices.length) return a;
+   169→      const s = String(a == null ? "" : a).trim();
+   170→      if (/^\d+$/.test(s)) { const n = +s; if (n >= 0 && n < choices.length) return n; }
+   171→      const letter = s.toUpperCase().match(/^([A-H])\b/);
+   172→      if (letter) { const n = letter[1].charCodeAt(0) - 65; if (n >= 0 && n < choices.length) return n; }
+   173→      const idx = choices.findIndex(c => norm(c) === norm(s));
+   174→      if (idx >= 0) return idx;
+   175→      const idx2 = choices.findIndex(c => norm(c).includes(norm(s)) && norm(s).length > 2);
+   176→      if (idx2 >= 0) return idx2;
+   177→      return 0;
+   178→    }
+   179→    return a;
+   180→  }
+   181→  function normalizeQuiz(d) {
+   182→    if (!d || typeof d !== "object") return null;
+   183→    if (Array.isArray(d)) d = { questions: d };
+   184→    const qs = [];
+   185→    (d.questions || d.items || d.qs || []).forEach(q => {
+   186→      if (!q || typeof q !== "object" || !(q.q || q.question || q.prompt)) return;
+   187→      const q2 = {
+   188→        q: String(q.q || q.question || q.prompt),
+   189→        options: Array.isArray(q.options) ? q.options.filter(o => o != null).map(String)
+   190→          : (q.options != null ? [String(q.options)] : null),
+   191→        explain: q.explain || q.explanation || q.why || null,
+   192→        hint: q.hint || null
+   193→      };
+   194→      q2.type = normType(q.type || (q2.options ? "mcq" : "short")) || "short";
+   195→      if (q2.type === "tf") q2.options = ["True", "False"];
+   196→      if (q2.type === "mcq" && (!q2.options || q2.options.length < 2)) return;
+   197→      if (q2.type === "multi" && (!q2.options || q2.options.length < 2)) return;
+   198→      if (q2.type === "mcq" || q2.type === "tf") {
+   199→        q2.answer = normAnswer(q, q2.type, q2.options || ["True", "False"]);
+   200→      } else if (q2.type === "multi") {
+   201→        let answers = q.answers ?? q.answer;
+   202→        if (answers == null) answers = [];
+   203→        if (!Array.isArray(answers)) answers = [answers];
+   204→        q2.answers = answers.map(a => {
+   205→          const n = typeof a === "number" ? a : parseInt(String(a), 10);
+   206→          return (isNaN(n) && q2.options) ? q2.options.findIndex(o => norm(o) === norm(a)) : n;
+   207→        }).filter(n => n >= 0 && n < (q2.options || []).length);
+   208→        if (!q2.answers.length) return;
+   209→      } else {
+   210→        const acc = [].concat(q.accept || q.accepts || []).map(String);
+   211→        q2.answer = String(q.answer ?? q.answers ?? q.a ?? "").trim();
+   212→        if (!q2.answer && !acc.length) return;
+   213→        q2.accept = acc;
+   214→      }
+   215→      qs.push(q2);
+   216→    });
+   217→    if (qs.length < 1) return null;
+   218→    return { title: d.title || d.topic || "Quiz", difficulty: d.difficulty || null, questions: qs };
+   219→  }
+   220→
+   221→  /* ============ QUIZ ============ */
+   222→  function renderQuiz(raw, ctx) {
+   223→    const d = normalizeQuiz(raw);
+   224→    if (!d) return null;
+   225→    const wrap = el("div", "blk blk-quiz");
+   226→    const qs = d.questions;
+   227→    const state = Object.assign({ screen: "start", i: 0, answers: {}, score: 0 },
+   228→      (ctx.state && ctx.state.quiz) || {});
+   229→    const save = () => ctx.save && ctx.save({ quiz: state });
+   230→    let order = state.order && state.order.length === qs.length ? state.order : qs.map((_, i) => i);
+   231→
+   232→    function startScreen() {
+   233→      wrap.innerHTML = "";
+   234→      const head = el("div", "blk-quiz-head",
+   235→        `<div class="blk-quiz-badge">${Ace.ICON("bulb", 16)}</div>
+   236→         <div><div class="blk-quiz-title">${esc(d.title || "Quiz")}</div>
+   237→         <div class="blk-quiz-meta">${qs.length} questions${d.difficulty ? ` · ${esc(d.difficulty)}` : ""} · mixed types</div></div>`);
+   238→      const go = btn("Start quiz", "btn-primary", "play");
+   239→      go.onclick = () => { state.screen = "q"; state.i = 0; state.score = 0; state.answers = {};
+   240→        if (state.reshuffle) { order = qs.map((_, i) => i).sort(() => Math.random() - .5); state.order = order; state.reshuffle = false; }
+   241→        save(); draw(); };
+   242→      const row = el("div", "blk-quiz-actions"); row.append(go); head.append(row);
+   243→      wrap.append(head);
+   244→    }
+   245→
+   246→    function question(q, qi) {
+   247→      const picked = state.answers[qi];
+   248→      const isAnswered = picked != null;
+   249→      const correct = isAnswered && picked.correct;
+   250→      wrap.innerHTML = "";
+   251→      const prog = el("div", "blk-prog", `<div class="blk-prog-bar" style="width:${(qi / qs.length) * 100}%"></div>`);
+   252→      const head = el("div", "blk-quiz-qhead",
+   253→        `<span class="blk-quiz-count">Question ${qi + 1} of ${qs.length}</span>
+   254→         <span class="blk-quiz-score">${Ace.ICON("check", 13)} ${state.score} correct</span>`);
+   255→      const qEl = el("div", "blk-quiz-q", mdInline(q.q));
+   256→
+   257→      const type = q.type;
+   258→      const body = el("div", "blk-quiz-body");
+   259→      let chosen = isAnswered ? picked.choice : (type === "mcq" || type === "tf" ? -1 : type === "multi" ? [] : "");
+   260→      const choices = type === "tf" ? ["True", "False"] : (q.options || []);
+   261→
+   262→      function submit() {
+   263→        let ok = false;
+   264→        if (type === "mcq" || type === "tf") ok = chosen === q.answer;
+   265→        else if (type === "multi") {
+   266→          const want = (q.answers || []).slice().sort().join(",");
+   267→          ok = chosen.slice().sort().join(",") === want;
+   268→        } else {
+   269→          const acc = [q.answer].concat(q.accept || []).map(norm).filter(Boolean);
+   270→          const mine = norm(chosen);
+   271→          ok = acc.some(a => a === mine ||
+   272→            (mine.length > 3 && a.length > 3 && (a.includes(mine) || mine.includes(a))));
+   273→        }
+   274→        state.answers[qi] = { choice: chosen, correct: ok, text: type === "short" ? chosen : null };
+   275→        if (ok) state.score++;
+   276→        save(); draw();
+   277→      }
+   278→
+   279→      if (type === "mcq" || type === "tf") {
+   280→        choices.forEach((opt, oi) => {
+   281→          const o = el("button", "blk-opt" + (chosen === oi ? " sel" : ""),
+   282→            `<span class="blk-opt-mark"></span><span class="blk-opt-text">${mdInline(opt)}</span>`);
+   283→          o.onclick = () => { if (isAnswered) return; chosen = oi; wrap.querySelectorAll(".blk-opt").forEach(x => x.classList.remove("sel")); o.classList.add("sel"); };
+   284→          if (isAnswered) {
+   285→            const isRight = oi === q.answer;
+   286→            if (isRight) o.classList.add("right");
+   287→            else if (chosen === oi) o.classList.add("wrong");
+   288→            o.disabled = true;
+   289→          }
+   290→          body.append(o);
+   291→        });
+   292→      } else if (type === "multi") {
+   293→        choices.forEach((opt, oi) => {
+   294→          const o = el("button", "blk-opt blk-opt-multi" + (chosen.includes(oi) ? " sel" : ""),
+   295→            `<span class="blk-opt-mark"></span><span class="blk-opt-text">${mdInline(opt)}</span>`);
+   296→          o.onclick = () => { if (isAnswered) return;
+   297→            chosen = chosen.includes(oi) ? chosen.filter(x => x !== oi) : chosen.concat([oi]);
+   298→            o.classList.toggle("sel"); };
+   299→          if (isAnswered) {
+   300→            if ((q.answers || []).includes(oi)) o.classList.add("right");
+   301→            else if (chosen.includes(oi)) o.classList.add("wrong");
+   302→            o.disabled = true;
+   303→          }
+   304→          body.append(o);
+   305→        });
+   306→      } else {
+   307→        const inp = el("input", "blk-input");
+   308→        inp.type = "text"; inp.placeholder = "Type your answer…"; inp.value = chosen || "";
+   309→        inp.oninput = () => chosen = inp.value;
+   310→        inp.onkeydown = (e) => { if (e.key === "Enter" && !isAnswered && inp.value.trim()) submit(); };
+   311→        if (isAnswered) inp.disabled = true;
+   312→        body.append(inp);
+   313→      }
+   314→
+   315→      const foot = el("div", "blk-quiz-actions");
+   316→      if (!isAnswered) {
+   317→        if (q.hint) {
+   318→          const hintBtn = btn("Hint", "btn-ghost", "bulb");
+   319→          hintBtn.onclick = () => {
+   320→            const ex = foot.querySelector(".blk-hint");
+   321→            if (ex) ex.remove();
+   322→            else foot.append(el("div", "blk-hint", "<b>Hint:</b> " + mdInline(q.hint)));
+   323→          };
+   324→          foot.append(hintBtn);
+   325→        }
+   326→        const go = btn(type === "short" ? "Check answer" : "Submit", "btn-primary", "check");
+   327→        const canSubmit = () => type === "multi" ? chosen.length : type === "short" ? String(chosen).trim() : chosen >= 0;
+   328→        go.onclick = () => { if (canSubmit()) submit(); };
+   329→        if (type === "mcq" || type === "tf") {
+   330→          const tick = () => go.classList.toggle("disabled", !canSubmit());
+   331→          body.querySelectorAll(".blk-opt").forEach(o => o.addEventListener("click", tick));
+   332→        }
+   333→        if (type === "short") inp.addEventListener("input", () => go.classList.toggle("disabled", !canSubmit()));
+   334→        go.classList.add("disabled");
+   335→        foot.append(go);
+   336→      } else {
+   337→        const ansText = type === "short" ? q.answer
+   338→          : type === "multi" ? (q.answers || []).map(i => choices[i]).join(", ")
+   339→          : choices[q.answer];
+   340→        const verdict = el("div", "blk-verdict " + (correct ? "ok" : "no"),
+   341→          correct ? `${Ace.ICON("check", 15)} Correct!` :
+   342→          `${Ace.ICON("close", 15)} Not quite — answer: <b>${esc(ansText)}</b>`);
+   343→        foot.append(verdict);
+   344→        if (q.explain) foot.append(el("div", "blk-explain", "<b>Why:</b> " + mdInline(q.explain)));
+   345→        const next = btn(qi + 1 < qs.length ? "Next question" : "See results", "btn-primary", "chev");
+   346→        next.onclick = () => {
+   347→          if (qi + 1 < qs.length) { state.i = qi + 1; }
+   348→          else state.screen = "done";
+   349→          save(); draw();
+   350→        };
+   351→        foot.append(next);
+   352→      }
+   353→      wrap.append(prog, head, qEl, body, foot);
+   354→    }
+   355→
+   356→    function doneScreen() {
+   357→      wrap.innerHTML = "";
+   358→      const pct = Math.round((state.score / qs.length) * 100);
+   359→      const grade = pct >= 90 ? "Outstanding" : pct >= 75 ? "Strong" : pct >= 50 ? "Getting there" : "Keep drilling";
+   360→      const card = el("div", "blk-quiz-result",
+   361→        `<div class="blk-quiz-score-big">${state.score}<span>/${qs.length}</span></div>
+   362→         <div class="blk-quiz-grade">${grade}</div>
+   363→         <div class="blk-quiz-pct">${pct}%</div>`);
+   364→      const review = el("div", "blk-quiz-review");
+   365→      qs.forEach((q, qi2) => {
+   366→        const a = state.answers[qi2];
+   367→        review.append(el("div", "blk-quiz-revrow " + (a && a.correct ? "ok" : "no"),
+   368→          `<span>${a && a.correct ? "✓" : "✗"}</span><span>${mdInline(q.q)}</span>`));
+   369→      });
+   370→      const foot = el("div", "blk-quiz-actions");
+   371→      const retry = btn("Retry", "btn-ghost", "refresh");
+   372→      retry.onclick = () => { state.screen = "start"; state.reshuffle = true; save(); draw(); };
+   373→      const harder = btn("Make it harder", "btn-primary");
+   374→      harder.onclick = () => wrap.dispatchEvent(new CustomEvent("ace:block-action",
+   375→        { bubbles: true, detail: { type: "quiz-harder", topic: d.title || "" } }));
+   376→      foot.append(retry, harder);
+   377→      wrap.append(card, review, foot);
+   378→    }
+   379→
+   380→    function draw() {
+   381→      if (state.screen === "start") startScreen();
+   382→      else if (state.screen === "done") doneScreen();
+   383→      else question(qs[order[state.i]] || qs[state.i], state.i);
+   384→    }
+   385→    draw();
+   386→    return wrap;
+   387→  }
+   388→
+   389→  /* ============ FLASHCARDS ============ */
+   390→  function renderFlashcards(raw, ctx) {
+   391→    const d = Array.isArray(raw) ? { cards: raw } : raw;
+   392→    const cards = (d.cards || []).filter(c => c && (c.front || c.back));
+   393→    if (!cards.length) return null;
+   394→    const state = Object.assign({ i: 0, flipped: false, known: [] }, (ctx.state && ctx.state.cards) || {});
+   395→    const save = () => ctx.save && ctx.save({ cards: state });
+   396→    const wrap = el("div", "blk blk-fc");
+   397→    const title = el("div", "blk-title", `${esc(d.title || "Flashcards")} <span class="blk-sub">${cards.length} cards</span>`);
+   398→
+   399→    const stage = el("div", "blk-fc-stage");
+   400→    const cardEl = el("div", "blk-fc-card");
+   401→    const front = el("div", "blk-fc-face blk-fc-front"), back = el("div", "blk-fc-face blk-fc-back");
+   402→    cardEl.append(front, back);
+   403→
+   404→    function draw() {
+   405→      const c = cards[state.i] || {};
+   406→      front.innerHTML = mdInline(c.front);
+   407→      back.innerHTML = mdInline(c.back);
+   408→      cardEl.classList.toggle("flipped", !!state.flipped);
+   409→      stage.innerHTML = "";
+   410→      const count = el("div", "blk-fc-count", `Card ${state.i + 1} / ${cards.length} · ${state.known.length} known`);
+   411→      cardEl.onclick = () => { state.flipped = !state.flipped; save(); cardEl.classList.toggle("flipped", state.flipped); };
+   412→      const nav = el("div", "blk-quiz-actions");
+   413→      const prev = btn("‹ Prev", "btn-ghost"); prev.onclick = () => { state.i = Math.max(0, state.i - 1); state.flipped = false; save(); draw(); };
+   414→      const know = btn(state.known.includes(state.i) ? "✓ Known" : "Got it", "btn-ok");
+   415→      know.onclick = () => {
+   416→        if (!state.known.includes(state.i)) state.known.push(state.i); else state.known = state.known.filter(x => x !== state.i);
+   417→        save(); draw();
+   418→      };
+   419→      const next = btn("Next ›", "btn-primary"); next.onclick = () => { state.i = Math.min(cards.length - 1, state.i + 1); state.flipped = false; save(); draw(); };
+   420→      const shuffle = btn("", "btn-icon", "refresh");
+   421→      shuffle.title = "Shuffle";
+   422→      shuffle.onclick = () => { cards.sort(() => Math.random() - .5); state.i = 0; state.flipped = false; save(); draw(); };
+   423→      nav.append(prev, shuffle, know, next);
+   424→      stage.append(count, cardEl, nav);
+   425→    }
+   426→    draw();
+   427→    wrap.append(title, stage);
+   428→    return wrap;
+   429→  }
+   430→
+   431→  /* ============ SCORECARD ============ */
+   432→  function renderScorecard(d) {
+   433→    const wrap = el("div", "blk blk-scorecard");
+   434→    const max = d.ratingMax || 10;
+   435→    const head = el("div", "blk-sc-head",
+   436→      `<div class="blk-sc-rating"><span class="blk-sc-num">${esc(d.rating != null ? d.rating : "–")}</span><span class="blk-sc-max">/${esc(max)}</span></div>
+   437→       <div class="blk-sc-titlewrap"><div class="blk-sc-title">${esc(d.title || "Scorecard")}</div>
+   438→       ${d.headline ? `<div class="blk-sc-headline">${mdInline(d.headline)}</div>` : ""}</div>`);
+   439→    wrap.append(head);
+   440→    if (d.rating != null) {
+   441→      const bar = el("div", "blk-sc-bar", `<div style="width:${Math.max(0, Math.min(100, (d.rating / max) * 100))}%"></div>`);
+   442→      wrap.append(bar);
+   443→    }
+   444→    if (d.stats && d.stats.length) {
+   445→      const grid = el("div", "blk-sc-grid");
+   446→      d.stats.forEach(s => grid.append(el("div", "blk-sc-stat",
+   447→        `<div class="blk-sc-val">${esc(s.value)}</div><div class="blk-sc-lbl">${esc(s.label)}</div>`)));
+   448→      wrap.append(grid);
+   449→    }
+   450→    if (d.ranked && d.ranked.length) {
+   451→      const list = el("div", "blk-sc-ranked");
+   452→      d.ranked.forEach((r, i) => list.append(el("div", "blk-sc-rank",
+   453→        `<div class="blk-sc-rankn">${i + 1}</div>
+   454→         <div class="blk-sc-rankbody"><div class="blk-sc-ranklbl">${mdInline(r.label)}</div>
+   455→         ${r.note ? `<div class="blk-sc-ranknote">${mdInline(r.note)}</div>` : ""}</div>
+   456→         <div class="blk-sc-rankval">${esc(r.value)}</div>`)));
+   457→      wrap.append(list);
+   458→    }
+   459→    if (d.notes) wrap.append(el("div", "blk-notes", mdInline(d.notes)));
+   460→    if (d.best && d.best.length) {
+   461→      const best = el("div", "blk-sc-best");
+   462→      d.best.forEach(b => best.append(el("div", "blk-sc-brow",
+   463→        `<div class="blk-sc-blbl">${esc(b.label)}</div><div class="blk-sc-bval">${mdInline(b.value)}${b.note ? ` <span class="blk-sub">— ${mdInline(b.note)}</span>` : ""}</div>`)));
+   464→      wrap.append(best);
+   465→    }
+   466→    return wrap;
+   467→  }
+   468→
+   469→  /* ============ STATS ============ */
+   470→  function renderStats(d) {
+   471→    const items = d.items || [];
+   472→    if (!items.length) return null;
+   473→    const wrap = el("div", "blk blk-stats");
+   474→    if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
+   475→    const grid = el("div", "blk-stat-grid");
+   476→    items.forEach(s => grid.append(el("div", "blk-stat",
+   477→      `<div class="blk-stat-val">${esc(s.value)}</div>
+   478→       <div class="blk-stat-lbl">${esc(s.label)}</div>
+   479→       ${s.sub ? `<div class="blk-stat-sub">${esc(s.sub)}</div>` : ""}`)));
+   480→    wrap.append(grid);
+   481→    return wrap;
+   482→  }
+   483→
+   484→  /* ============ COMPARE ============ */
+   485→  function renderCompare(d) {
+   486→    const cols = d.columns || [];
+   487→    const rows = (d.rows || []).filter(r => r && r.values);
+   488→    if (!cols.length || !rows.length) return null;
+   489→    const wrap = el("div", "blk blk-compare");
+   490→    if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
+   491→    const t = el("table", "blk-compare-t");
+   492→    t.innerHTML = `<thead><tr><th></th>${cols.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead>`;
+   493→    const tb = el("tbody");
+   494→    rows.forEach(r => {
+   495→      const tr = el("tr");
+   496→      tr.append(el("td", "blk-compare-lbl", esc(r.label)));
+   497→      r.values.forEach((v, i) => {
+   498→        tr.append(el("td", r.winner === i ? "win" : "", `${mdInline(v)}${r.winner === i ? `<span class="win-b">✓</span>` : ""}`));
+   499→      });
+   500→      tb.append(tr);
+   501→    });
+   502→    t.append(tb); wrap.append(t);
+   503→    if (d.verdict) wrap.append(el("div", "blk-notes", "<b>Verdict:</b> " + mdInline(d.verdict)));
+   504→    return wrap;
+   505→  }
+   506→
+   507→  /* ============ STEPS ============ */
+   508→  function renderSteps(d) {
+   509→    const steps = d.steps || [];
+   510→    if (!steps.length) return null;
+   511→    const wrap = el("div", "blk blk-steps");
+   512→    if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
+   513→    steps.forEach((s, i) => {
+   514→      if (typeof s === "string") s = { detail: s };
+   515→      wrap.append(el("div", "blk-step",
+   516→        `<div class="blk-step-n">${i + 1}</div>
+   517→         <div class="blk-step-body">${s.name ? `<div class="blk-step-name">${mdInline(s.name)}</div>` : ""}
+   518→         <div class="blk-step-detail">${mdInline(s.detail || s.text || "")}</div></div>`));
+   519→    });
+   520→    return wrap;
+   521→  }
+   522→
+   523→  /* ============ TIMELINE ============ */
+   524→  function renderTimeline(d) {
+   525→    const evs = d.events || [];
+   526→    if (!evs.length) return null;
+   527→    const wrap = el("div", "blk blk-tl");
+   528→    if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
+   529→    const rail = el("div", "blk-tl-rail");
+   530→    evs.forEach(e => rail.append(el("div", "blk-tl-ev",
+   531→      `<div class="blk-tl-dot"></div>
+   532→       <div class="blk-tl-when">${esc(e.when || "")}</div>
+   533→       <div class="blk-tl-what">${mdInline(e.what || "")}</div>
+   534→       ${e.detail ? `<div class="blk-tl-detail">${mdInline(e.detail)}</div>` : ""}`)));
+   535→    wrap.append(rail);
+   536→    return wrap;
+   537→  }
+   538→
+   539→  /* ============ TERMS ============ */
+   540→  function renderTerms(d) {
+   541→    const terms = (d.terms || []).filter(t => t && t.term);
+   542→    if (!terms.length) return null;
+   543→    const wrap = el("div", "blk blk-terms");
+   544→    if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
+   545→    const grid = el("div", "blk-terms-grid");
+   546→    terms.forEach(t => grid.append(el("div", "blk-term",
+   547→      `<div class="blk-term-t">${mdInline(t.term)}</div>
+   548→       <div class="blk-term-d">${mdInline(t.def || t.definition)}</div>
+   549→       ${t.example ? `<div class="blk-term-e"><b>e.g.</b> ${mdInline(t.example)}</div>` : ""}`)));
+   550→    wrap.append(grid);
+   551→    return wrap;
+   552→  }
+   553→
+   554→  /* ============ TABLE ============ */
+   555→  function renderTable(d) {
+   556→    const cols = d.columns || d.headers || [];
+   557→    const rows = (d.rows || []).filter(r => Array.isArray(r) ? r.length : r);
+   558→    if (!cols.length || !rows.length) return null;
+   559→    const wrap = el("div", "blk blk-table");
+   560→    if (d.title) wrap.append(el("div", "blk-title", esc(d.title)));
+   561→    const tw = el("div", "blk-tablewrap");
+   562→    const t = el("table", "blk-table-t");
+   563→    const thead = el("thead");
+   564→    const hr = el("tr");
+   565→    cols.forEach((c, ci) => {
+   566→      const th = el("th", "", esc(c) + (d.sortable === false ? "" : ` <span class="sort-ic">⇅</span>`));
+   567→      if (d.sortable !== false) th.onclick = () => sortRows(ci, th);
+   568→      hr.append(th);
+   569→    });
+   570→    thead.append(hr); t.append(thead);
+   571→    const tb = el("tbody");
+   572→    function drawRows(data) {
+   573→      tb.innerHTML = "";
+   574→      data.forEach(r => tb.append(el("tr", cols.map((_, i) => `<td>${mdInline(Array.isArray(r) ? r[i] : (r[cols[i]] ?? ""))}</td>`).join(""))));
+   575→    }
+   576→    function sortRows(ci, th) {
+   577→      const cur = th.getAttribute("data-dir");
+   578→      const dir = cur === "asc" ? -1 : 1;
+   579→      t.querySelectorAll("th").forEach(x => x.removeAttribute("data-dir"));
+   580→      th.setAttribute("data-dir", dir === 1 ? "asc" : "desc");
+   581→      drawRows(rows.slice().sort((a, b) => {
+   582→        const x = String(Array.isArray(a) ? a[ci] : a[cols[ci]] ?? ""), y = String(Array.isArray(b) ? b[ci] : b[cols[ci]] ?? "");
+   583→        const nx = parseFloat(x.replace(/[^0-9.\-]/g, "")), ny = parseFloat(y.replace(/[^0-9.\-]/g, ""));
+   584→        if (!isNaN(nx) && !isNaN(ny) && x.match(/\d/)) return (nx - ny) * dir;
+   585→        return x.localeCompare(y) * dir;
+   586→      }));
+   587→    }
+   588→    drawRows(rows);
+   589→    t.append(tb); tw.append(t); wrap.append(tw);
+   590→    return wrap;
+   591→  }
+   592→
+   593→  /* ============ PROGRESS ============ */
+   594→  function renderProgress(d, ctx) {
+   595→    const tasks = (d.tasks || []).filter(t => t && t.label);
+   596→    if (!tasks.length) return null;
+   597→    const state = Object.assign({ done: [] }, (ctx.state && ctx.state.progress) || {});
+   598→    const save = () => ctx.save && ctx.save({ progress: state });
+   599→    const wrap = el("div", "blk blk-progress");
+   600→    const totalW = tasks.reduce((a, t) => a + (t.weight || 1), 0);
+   601→    const doneW = tasks.reduce((a, t, i) => a + (state.done.includes(i) ? (t.weight || 1) : 0), 0);
+   602→    if (d.title) wrap.append(el("div", "blk-title", `${esc(d.title)} ${d.due ? `<span class="blk-sub">· due ${esc(d.due)}</span>` : ""}`));
+   603→    wrap.append(el("div", "blk-prog blk-prog-lg", `<div class="blk-prog-bar" style="width:${totalW ? (doneW / totalW) * 100 : 0}%"></div>`));
+   604→    wrap.append(el("div", "blk-prog-lbl", `${doneW}/${totalW} points · ${Math.round(totalW ? (doneW / totalW) * 100 : 0)}%`));
+   605→    const list = el("div", "blk-progress-list");
+   606→    tasks.forEach((t, i) => {
+   607→      const on = state.done.includes(i);
+   608→      const row = el("div", "blk-prow" + (on ? " on" : ""),
+   609→        `<button class="blk-pcheck" aria-label="toggle">${on ? Ace.ICON("check", 13) : ""}</button>
+   610→         <span class="blk-plabel">${mdInline(t.label)}</span>
+   611→         <span class="blk-pweight">${"●".repeat(Math.min(5, t.weight || 1))}</span>`);
+   612→      row.querySelector(".blk-pcheck").onclick = () => {
+   613→        state.done = on ? state.done.filter(x => x !== i) : state.done.concat([i]);
+   614→        save();
+   615→        wrap.replaceWith(renderProgress(d, ctx));
+   616→      };
+   617→      list.append(row);
+   618→    });
+   619→    wrap.append(list);
+   620→    return wrap;
+   621→  }
+   622→
+   623→  /* ============ CODE BLOCK (fallback fence) ============ */
+   624→  function renderCode(lang, body) {
+   625→    const wrap = el("div", "blk blk-code");
+   626→    const head = el("div", "blk-code-head",
+   627→      `<span>${esc(lang || "code")}</span>`);
+   628→    const cp = btn("Copy", "btn-ghost", "copy");
+   629→    cp.onclick = () => {
+   630→      navigator.clipboard && navigator.clipboard.writeText(body).then(() => {
+   631→        cp.innerHTML = Ace.ICON("check", 14) + "Copied";
+   632→        setTimeout(() => cp.innerHTML = Ace.ICON("copy", 14) + "Copy", 1400);
+   633→      });
+   634→    };
+   635→    head.append(cp);
+   636→    const pre = el("pre", "", `<code>${esc(body)}</code>`);
+   637→    wrap.append(head, pre);
+   638→    return wrap;
+   639→  }
+   640→
+   641→  /* ============ dispatcher ============ */
+   642→  const RENDERERS = { quiz: renderQuiz, flashcards: renderFlashcards, scorecard: renderScorecard,
+   643→    stats: renderStats, compare: renderCompare, steps: renderSteps, timeline: renderTimeline,
+   644→    terms: renderTerms, table: renderTable, progress: renderProgress };
+   645→
+   646→  /* Shape-based inference: the model sometimes labels blocks ```json (or nothing).
+   647→     Detect the intended component from the JSON's fields. */
+   648→  function inferType(d) {
+   649→    if (!d || typeof d !== "object") return null;
+   650→    if (Array.isArray(d)) {
+   651→      if (d.length && d[0] && ("front" in d[0] || "back" in d[0])) return "flashcards";
+   652→      if (d.length && d[0] && ("q" in d[0] || "question" in d[0])) return "quiz";
+   653→      return null;
+   654→    }
+   655→    if (Array.isArray(d.questions)) return "quiz";
+   656→    if (Array.isArray(d.cards)) return "flashcards";
+   657→    if (d.rating != null && (d.stats || d.ranked || d.headline || d.best)) return "scorecard";
+   658→    if (Array.isArray(d.items) && d.items[0] && "value" in d.items[0]) return "stats";
+   659→    if (Array.isArray(d.rows) && d.rows[0] && typeof d.rows[0] === "object" && "values" in d.rows[0]) return "compare";
+   660→    if (Array.isArray(d.steps)) return "steps";
+   661→    if (Array.isArray(d.events)) return "timeline";
+   662→    if (Array.isArray(d.terms)) return "terms";
+   663→    if (Array.isArray(d.tasks)) return "progress";
+   664→    if (Array.isArray(d.columns) && Array.isArray(d.rows)) return "table";
+   665→    return null;
+   666→  }
+   667→
+   668→  Ace.Blocks = {
+   669→    isBlock(lang) { return RENDERERS.hasOwnProperty(String(lang || "").toLowerCase()); },
+   670→    parse: parseLoose,
+   671→    render(lang, body, ctx) {
+   672→      const langN = String(lang || "").toLowerCase();
+   673→      let data = parseLoose(body);
+   674→      if (data === null || data === undefined) return renderCode(langN, body);
+   675→      const type = RENDERERS[langN] ? langN : inferType(data);
+   676→      if (!type) return renderCode(langN, body);
+   677→      try {
+   678→        const node = RENDERERS[type](data, ctx || {});
+   679→        return node || renderCode(langN, body);
+   680→      } catch (e) {
+   681→        console.warn("block render failed", type, e);
+   682→        return renderCode(langN, body);
+   683→      }
+   684→    },
+   685→    renderCode
+   686→  };
+   687→})();
+   688→

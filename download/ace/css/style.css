@@ -474,3 +474,76 @@ select.input { appearance: none; }
   .messages { max-width: 100%; }
   .msg, .blk { break-inside: avoid; }
 }
+
+/* ============ PLUS MENU (attach) ============ */
+.plus-wrap { position: relative; }
+.cbtn.active { background: var(--accent-dim); color: var(--accent); transform: rotate(45deg); transition: transform .18s ease; }
+.plus-menu {
+  position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 90;
+  width: 264px; padding: 6px;
+  background: #2a2a2a; border: 1px solid var(--border-2); border-radius: 15px;
+  box-shadow: 0 16px 48px rgba(0,0,0,.5);
+  animation: pop .15s ease;
+}
+.pm-item {
+  display: flex; align-items: flex-start; gap: 11px; width: 100%;
+  padding: 10px 11px; border-radius: 10px; text-align: left;
+}
+.pm-item:hover { background: var(--bg-hover); }
+.pm-item svg { color: var(--accent); margin-top: 2px; flex: 0 0 auto; }
+.pm-item b { display: block; font-size: 13.5px; font-weight: 650; color: var(--text); }
+.pm-item small { display: block; font-size: 11.5px; color: var(--faint); margin-top: 2px; line-height: 1.35; }
+
+/* ============ FILE CHIPS (composer + user bubble) ============ */
+.filechip {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--bg-raise); border: 1px solid var(--border-2);
+  border-radius: 11px; padding: 7px 10px; position: relative;
+  max-width: 230px; cursor: default;
+}
+.fc-ic { color: var(--accent); display: flex; }
+.fc-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fc-size { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.filechip .imgchip-x { position: static; width: 18px; height: 18px; background: var(--bg-hover); color: var(--muted); }
+.filechip .imgchip-x:hover { background: var(--danger); color: #fff; }
+
+.msg-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.msg-file {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+  border-radius: 9px; padding: 6px 10px;
+}
+.msg-file .fc-ic { color: #fff; opacity: .85; }
+.msg-file-name { font-size: 12px; font-weight: 600; color: #fff; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-file-size { font-size: 10.5px; color: rgba(255,255,255,.6); }
+
+/* ============ AGENT MODEL PICKER ============ */
+.modelpick { display: flex; flex-direction: column; gap: 4px; }
+.mp-row {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 10px 12px; border-radius: 11px; text-align: left;
+  border: 1px solid transparent;
+}
+.mp-row:hover { background: var(--bg-hover); }
+.mp-row.sel { background: var(--accent-dim); border-color: rgba(79,140,255,.35); }
+.mp-ic { color: var(--muted); display: flex; }
+.mp-row.sel .mp-ic { color: var(--accent); }
+.mp-body { flex: 1; min-width: 0; }
+.mp-name { display: block; font-size: 13.5px; font-weight: 650; color: var(--text); }
+.mp-tag { display: block; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
+.mp-radio { color: var(--accent); display: flex; }
+
+/* ============ AGENT TRACE EXTRAS ============ */
+.work-request {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--muted); padding: 2px 2px 8px;
+  border-bottom: 1px dashed var(--border); margin-bottom: 8px;
+}
+.wr-ic { color: var(--accent); display: flex; }
+.wr-txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+.work-plan-meta { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.wpm { font-size: 11.5px; color: var(--faint); display: inline-flex; align-items: center; gap: 4px; }
+.wpm.pal { gap: 3px; }
+.wpm.pal i { width: 12px; height: 12px; border-radius: 4px; display: inline-block; border: 1px solid rgba(255,255,255,.18); }
+.ws-live { color: var(--accent); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+.work-step-d summary { flex-wrap: wrap; row-gap: 2px; }

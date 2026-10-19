@@ -199,6 +199,19 @@ function safeHost(link) {
   try { return new URL(link).hostname; } catch { return ""; }
 }
 
+/* Relevance validation — engines sometimes return cached junk that has
+   NOTHING to do with the query (Bing RSS has degraded badly). A ref must
+   mention a fair share of the query's keywords or it's dropped. */
+function isRelevant(ref: any, query: string, minRatio = 0.34) {
+  const terms = String(query || "").toLowerCase().split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 2);
+  if (!terms.length) return true;
+  const hay = ((ref?.title || "") + " " + (ref?.content || "")).toLowerCase();
+  let hits = 0;
+  for (const t of terms) if (hay.includes(t)) hits++;
+  return hits >= Math.max(1, Math.ceil(terms.length * minRatio));
+}
+
 export async function GET(req) {
   const rawQ = (new URL(req.url)).searchParams.get("q") || "";
   if (!rawQ.trim()) return Response.json({ refs: [] });
@@ -208,23 +221,39 @@ export async function GET(req) {
   const cached = CACHE.get(key);
   if (cached && Date.now() - cached.ts < 300000) return Response.json({ refs: cached.refs, cached: true });
 
-  // Parallel: Bing RSS (reliable real web results) + DDG HTML + Wikipedia + DDG IA.
-  // Whichever engines answer, answer — no single point of failure.
-  const jobs = [bingWeb(q), ddgWeb(q), wikipedia(q), ddgIA(q)];
-  if (NEWSY.test(q)) jobs.push(googleNews(q));
+  // Parallel engines. Whichever answers, answers — validated afterwards so
+  // junk (Bing RSS's random cached pages) never reaches the model.
+  const newsy = NEWSY.test(q);
+  const jobs: Promise<any[]>[] = [bingWeb(q), ddgWeb(q), wikipedia(q), ddgIA(q)];
+  const newsyRefs = newsy ? await googleNews(q).catch(() => []) : [];
+  if (!newsy) jobs.push(googleNews(q).catch(() => [])); // broad fallback pool
   const settled = await Promise.all(jobs);
   let refs = settled.flat();
 
+  // validate + dedupe + junk-domain filter
   const seen = new Set();
-  refs = refs
-    .filter((x) => x?.link && x?.content && !JUNK.test(safeHost(x.link)) && !seen.has(x.link) && seen.add(x.link))
-    .slice(0, 10);
+  refs = refs.filter((x) =>
+    x?.link && x?.content && !JUNK.test(safeHost(x.link)) &&
+    !seen.has(x.link) && seen.add(x.link));
 
-  if (refs.length) CACHE.set(key, { ts: Date.now(), refs });
+  let good = refs.filter((x) => isRelevant(x, q));
+
+  // news results are headlines — validate against a looser bar
+  const goodNews = newsyRefs.filter((x) => isRelevant(x, q, 0.25));
+
+  // merge: web results first, then news; if web came back thin, news fills in
+  let final = [...good, ...goodNews.filter((n) => !good.some((g) => g.link === n.link))];
+  if (final.length < 3) {
+    const extra = refs.filter((x) => !final.some((f) => f.link === x.link) && isRelevant(x, q, 0.25));
+    final = [...final, ...extra];
+  }
+  final = final.slice(0, 10);
+
+  if (final.length) CACHE.set(key, { ts: Date.now(), refs: final });
   if (CACHE.size > 200) CACHE.delete(CACHE.keys().next().value);
 
   return Response.json(
-    { refs },
+    { refs: final },
     { headers: { "Cache-Control": "no-store" } }
   );
 }
