@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#212121">
+  <meta name="description" content="Ace — your AI study copilot. Chat with memory, live web search, interactive quizzes, and an agentic app builder. Powered by GLM.">
+  <title>Ace — AI Study Copilot</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%234f8cff' d='M13 2L4.5 13.5H11L9.5 22 19 9.5h-6.5z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/blocks.css">
+  <script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+</head>
+<body>
+
+  <!-- ============ FIRST-RUN SETUP (API key never ships in the repo) ============ -->
+  <div id="setupScreen" class="setup hidden">
+    <div class="setup-card">
+      <div class="setup-logo"><svg width="46" height="46" viewBox="0 0 24 24"><path fill="#4f8cff" d="M13 2L4.5 13.5H11L9.5 22 19 9.5h-6.5z"/></svg></div>
+      <h1>Connect your brain</h1>
+      <p class="setup-sub">Paste your Z.ai API key once — it's stored privately in <b>your Firebase</b>, never in the GitHub repo, and everyone you share the app with gets it automatically.</p>
+      <input id="setupKey" class="input mono" type="password" placeholder="Paste Z.ai API key (e.g. 84de…UW2u)" autocomplete="off" spellcheck="false">
+      <button id="setupGo" class="btn btn-primary btn-lg">Launch Ace →</button>
+      <div id="setupMsg" class="setup-msg">Free GLM keys work · grab one at <a href="https://z.ai" target="_blank" rel="noopener">z.ai → API Keys</a></div>
+      <div class="setup-feats">
+        <span>🧠 Real memory</span><span>🌐 Live web search</span><span>🎯 Interactive quizzes</span><span>🛠️ App builder</span><span>🖼️ Photo homework</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ APP ============ -->
+  <div id="app" class="app">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sb-top">
+        <div class="sb-logo"><svg width="22" height="22" viewBox="0 0 24 24"><path fill="#4f8cff" d="M13 2L4.5 13.5H11L9.5 22 19 9.5h-6.5z"/></svg> Ace</div>
+        <button id="sbCollapse" class="ibtn" title="Close sidebar" aria-label="Close sidebar"></button>
+      </div>
+      <button id="btnNewChat" class="sb-new"></button>
+      <div class="sb-search" id="sbSearchWrap">
+        <span class="sb-search-ic" id="sbSearchIc"></span>
+        <input id="chatSearch" type="search" placeholder="Search chats  (Ctrl+K)" aria-label="Search chats">
+      </div>
+      <nav id="chatList" class="sb-list" aria-label="Chat history"></nav>
+      <div class="sb-bottom">
+        <button id="btnMemory" class="sb-foot-btn"></button>
+        <button id="btnSettings" class="sb-foot-btn"></button>
+        <div class="sb-user">
+          <div class="sb-avatar" id="userAvatar">A</div>
+          <div class="sb-usermeta">
+            <div class="sb-username">You</div>
+            <div class="sb-sync" id="syncStatus">Connecting…</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main column -->
+    <main class="main">
+      <header class="topbar">
+        <button id="sbOpen" class="ibtn" title="Open sidebar" aria-label="Open sidebar"></button>
+        <div class="mode-pill" role="tablist" aria-label="Mode">
+          <button data-mode="chat" class="active" role="tab" aria-selected="true">Chat</button>
+          <button data-mode="work" role="tab" aria-selected="false">Work</button>
+        </div>
+        <div class="top-actions">
+          <button id="btnModelChip" class="chip" title="Model routing"></button>
+          <button id="btnExport" class="ibtn" title="Export chat as Markdown"></button>
+          <button id="btnPrint" class="ibtn" title="Print / Save as PDF"></button>
+          <button id="btnSettingsTop" class="ibtn" title="Settings"></button>
+        </div>
+      </header>
+
+      <div id="scrollZone" class="scrollzone">
+        <section id="welcome" class="welcome">
+          <h1 id="welcomeTitle">What are we working on?</h1>
+          <p class="welcome-sub" id="welcomeSub">Homework, essays, quizzes, research — I got you.</p>
+          <div id="welcomeChips" class="welcome-chips"></div>
+        </section>
+        <section id="messages" class="messages hidden" aria-live="polite"></section>
+      </div>
+
+      <footer class="composer-wrap">
+        <div id="statusBar" class="statusbar hidden"></div>
+        <div id="attachRow" class="attachrow hidden"></div>
+        <div class="composer" id="composer">
+          <button id="btnAttach" class="cbtn" title="Attach image (or paste / drag & drop)" aria-label="Attach image"></button>
+          <textarea id="input" rows="1" placeholder="Ask anything — homework, essays, quizzes, research" aria-label="Message Ace"></textarea>
+          <div class="c-pills">
+            <button id="btnThink" class="pill" title="Think longer on the next answers">Think</button>
+            <button id="btnDeep" class="pill" title="Deep research: multi-angle web search + synthesized brief">Deep</button>
+            <button id="btnWeb" class="pill" title="Ground the answer in live web search">Web</button>
+          </div>
+          <button id="btnMic" class="cbtn" title="Voice input" aria-label="Voice input"></button>
+          <button id="btnSend" class="sendbtn" title="Send" aria-label="Send"></button>
+        </div>
+        <div class="disclaimer">Ace can make mistakes — check what matters. <span id="memHint"></span></div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Overlays -->
+  <div id="dropOverlay" class="dropoverlay">🖼️ Drop images here</div>
+  <div id="modalRoot"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <input type="file" id="fileInput" accept="image/*" multiple hidden>
+
+  <script src="js/config.js"></script>
+  <script src="js/prompts.js"></script>
+  <script src="js/markdown.js"></script>
+  <script src="js/blocks.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/memory.js"></script>
+  <script src="js/images.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/work.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
