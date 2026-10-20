@@ -29,6 +29,12 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Bypass API Routes for Static Build
+        run: |
+          mkdir -p src/app/api/zai/chat src/app/api/zai/ping
+          echo "export const dynamic = 'force-static'; export function GET() { return new Response('static'); }" > src/app/api/zai/chat/route.ts
+          echo "export const dynamic = 'force-static'; export function GET() { return new Response('static'); }" > src/app/api/zai/ping/route.ts
+
       - name: Build Static Site
         run: bun run build
 
